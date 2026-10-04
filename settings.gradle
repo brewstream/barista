@@ -1,0 +1,4 @@
+rootProject.name = 'barista'
+
+include 'barista-core'
+include 'barista-spring-boot-starter'

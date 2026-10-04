@@ -1,0 +1,535 @@
+/*
+ * Copyright 2026 the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.brewstream.barista.engine;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
+import io.netty.buffer.Unpooled;
+import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.SimpleChannelInboundHandler;
+import io.netty.channel.nio.NioIoHandler;
+import io.netty.channel.socket.nio.NioDatagramChannel;
+import org.brewstream.barista.Brew;
+import org.brewstream.barista.BrewListener;
+import org.brewstream.barista.BrewState;
+import org.brewstream.barista.EndpointState;
+import org.brewstream.barista.EndpointStatus;
+import org.brewstream.barista.TsFixtures;
+import org.brewstream.barista.spec.BrewId;
+import org.brewstream.barista.spec.BrewSpec;
+import org.brewstream.barista.spec.OutputSpec;
+import org.brewstream.barista.spec.RtpReceiveEndpoint;
+import org.brewstream.barista.spec.RtpSendEndpoint;
+import org.brewstream.barista.spec.SourceId;
+import org.brewstream.barista.spec.SourceSpec;
+import org.brewstream.barista.spec.SrtCallerEndpoint;
+import org.brewstream.barista.spec.SrtListenerEndpoint;
+import org.brewstream.barista.support.InMemoryBrewRepository;
+import org.brewstream.barista.support.PortRange;
+import org.brewstream.barista.support.RangePortAllocator;
+import org.brewstream.barista.support.StaticNodeIdentity;
+import org.brewstream.press.net.RtpReceiver;
+import org.brewstream.press.net.RtpReceiverConfig;
+import org.brewstream.press.net.RtpSender;
+import org.brewstream.press.net.RtpSenderConfig;
+import org.brewstream.roast.socket.AcceptDecision;
+import org.brewstream.roast.socket.SrtCaller;
+import org.brewstream.roast.socket.SrtConnection;
+import org.brewstream.roast.socket.SrtListener;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.net.InetSocketAddress;
+import java.net.SocketException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+/**
+ * Brews over real sockets on loopback, with Roast and Press as the peers on both
+ * sides, as they would be on a network.
+ */
+class BaristaIntegrationTest {
+
+    private static final InetAddress LOOPBACK = InetAddress.getLoopbackAddress();
+    private static final String HOST = LOOPBACK.getHostAddress();
+
+    private final List<AutoCloseable> resources = new ArrayList<>();
+    private EventLoopGroup group;
+    private InMemoryBrewRepository repository;
+    private int srtFirst;
+    private int rtpFirst;
+    private DefaultBarista barista;
+
+    @BeforeEach
+    void setUp() throws IOException {
+        group = new MultiThreadIoEventLoopGroup(4, NioIoHandler.newFactory());
+        repository = new InMemoryBrewRepository();
+        srtFirst = freeRun(10);
+        rtpFirst = freeRun(40);
+        barista = engine(BaristaSettings.defaults());
+    }
+
+    @AfterEach
+    void tearDown() throws Exception {
+        for (AutoCloseable resource : resources.reversed()) {
+            try {
+                resource.close();
+            } catch (Exception e) {
+                // keep closing the rest
+            }
+        }
+        barista.close();
+        group.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
+    }
+
+    @Test
+    void relaysAnSrtPublisherToRtpAndSrtOutputs() throws Exception {
+        Sink rtp = rtpSink();
+        Sink srt = srtSink();
+        Brew brew = barista.create(BrewSpec.of("srt-in",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())),
+                List.of(OutputSpec.of("to-rtp", RtpSendEndpoint.to(HOST, rtp.port)),
+                        OutputSpec.of("to-srt", SrtCallerEndpoint.to(HOST, srt.port)))));
+        int port = ((SrtListenerEndpoint) brew.spec().sources().getFirst().endpoint()).port();
+        assertThat(port).as("allocated from the SRT range").isBetween(srtFirst, srtFirst + 9);
+        awaitOutput(brew, "to-srt", EndpointState.ACTIVE);
+
+        SrtConnection publisher = srtPublish(port);
+        byte[] ts = TsFixtures.packets(0, 7 * 60);
+        send(publisher, ts);
+
+        rtp.await(ts.length);
+        srt.await(ts.length);
+        assertThat(rtp.bytes()).isEqualTo(ts);
+        assertThat(srt.bytes()).isEqualTo(ts);
+        await(() -> brew.state() == BrewState.RUNNING, "brew running");
+        EndpointStatus source = brew.status().sources().getFirst();
+        assertThat(source.state()).isEqualTo(EndpointState.ACTIVE);
+        assertThat(source.address()).isEqualTo(HOST + ":" + port);
+        assertThat(source.bytes()).isEqualTo(ts.length);
+        await(() -> brew.status().sources().getFirst().health() != null, "source health");
+    }
+
+    @Test
+    void relaysAnRtpSourceToEverySrtSubscriber() throws Exception {
+        Brew brew = barista.create(BrewSpec.of("rtp-in",
+                List.of(SourceSpec.of("feed", 0, RtpReceiveEndpoint.unicast())),
+                List.of(OutputSpec.of("pull", SrtListenerEndpoint.any()))));
+        int rtpPort = ((RtpReceiveEndpoint) brew.spec().sources().getFirst().endpoint()).port();
+        int srtPort = ((SrtListenerEndpoint) brew.spec().outputs().getFirst().endpoint()).port();
+        assertThat(rtpPort).as("an RTP block base").isEqualTo(rtpFirst);
+        Sink first = srtSubscriber(srtPort);
+        Sink second = srtSubscriber(srtPort);
+        await(() -> brew.status().outputs().getFirst().connections() == 2, "two subscribers");
+
+        RtpSender sender = track(RtpSender.connect(RtpSenderConfig.to(new InetSocketAddress(LOOPBACK, rtpPort))));
+        byte[] ts = TsFixtures.packets(0, 7 * 60);
+        send(sender, ts);
+
+        first.await(ts.length);
+        second.await(ts.length);
+        assertThat(first.bytes()).isEqualTo(ts);
+        assertThat(second.bytes()).isEqualTo(ts);
+    }
+
+    @Test
+    void outputsJoinAndLeaveWhileTheBrewRuns() throws Exception {
+        Sink a = rtpSink();
+        Sink b = rtpSink();
+        Brew brew = barista.create(BrewSpec.of("live-changes",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())),
+                List.of(OutputSpec.of("a", RtpSendEndpoint.to(HOST, a.port)))));
+        SrtConnection publisher = srtPublish(srtPort(brew));
+        byte[] first = TsFixtures.packets(0, 70);
+        byte[] second = TsFixtures.packets(70, 70);
+        byte[] third = TsFixtures.packets(140, 70);
+
+        send(publisher, first);
+        a.await(first.length);
+        barista.update(brew.spec().withOutputs(List.of(brew.spec().outputs().getFirst(),
+                OutputSpec.of("b", RtpSendEndpoint.to(HOST, b.port)))));
+        send(publisher, second);
+        b.await(second.length);
+        a.await(first.length + second.length);
+        barista.update(brew.spec().withOutputs(List.of(brew.spec().outputs().get(1))));
+        send(publisher, third);
+        b.await(second.length + third.length);
+        Thread.sleep(200);
+
+        assertThat(a.bytes()).isEqualTo(concat(first, second));
+        assertThat(b.bytes()).isEqualTo(concat(second, third));
+        assertThat(brew.spec().outputs()).extracting(o -> o.id().value()).containsExactly("b");
+    }
+
+    @Test
+    void switchesBetweenSourcesThatAreAllKeptConnected() throws Exception {
+        Sink out = rtpSink();
+        List<SourceId> activations = new CopyOnWriteArrayList<>();
+        barista.addListener(new BrewListener() {
+            @Override
+            public void onSourceActivated(BrewId brew, SourceId source) {
+                activations.add(source);
+            }
+        });
+        Brew brew = barista.create(BrewSpec.of("pair",
+                List.of(SourceSpec.of("main", 0, RtpReceiveEndpoint.unicast()),
+                        SourceSpec.of("backup", 1, RtpReceiveEndpoint.unicast())),
+                List.of(OutputSpec.of("out", RtpSendEndpoint.to(HOST, out.port)))));
+        RtpSender main = track(RtpSender.connect(RtpSenderConfig.to(rtpAddress(brew, 0))));
+        RtpSender backup = track(RtpSender.connect(RtpSenderConfig.to(rtpAddress(brew, 1))));
+        byte[] fromMain = TsFixtures.packets(0, 70);
+        byte[] fromBackup = TsFixtures.packets(1000, 70);
+
+        send(main, fromMain);
+        send(backup, fromBackup);
+        out.await(fromMain.length);
+        Thread.sleep(200);
+        assertThat(out.bytes()).as("only the active source reaches the outputs").isEqualTo(fromMain);
+        assertThat(brew.status().sources().get(1).bytes()).as("the backup is monitored all the same")
+                .isEqualTo(fromBackup.length);
+
+        barista.activate(brew.id(), new SourceId("backup"));
+        byte[] laterBackup = TsFixtures.packets(2000, 70);
+        send(main, TsFixtures.packets(3000, 70));
+        send(backup, laterBackup);
+        out.await(fromMain.length + laterBackup.length);
+        Thread.sleep(200);
+
+        assertThat(out.bytes()).isEqualTo(concat(fromMain, laterBackup));
+        assertThat(brew.activeSource()).isEqualTo(new SourceId("backup"));
+        await(() -> activations.contains(new SourceId("backup")), "activation event");
+    }
+
+    /**
+     * An output whose peer never answers fills only its own queue, drops from it,
+     * and holds up nothing else. Queues are 128 KiB here: enough for a burst of
+     * source data (Roast releases tens of packets in one pass, which a queue
+     * smaller than that drops from even when drained on its own thread), and
+     * small enough that the dead output overflows on a 260 KiB stream.
+     */
+    @Test
+    void aDeadOutputHoldsUpNothingElse() throws Exception {
+        barista.close();
+        barista = engine(new BaristaSettings(Duration.ofSeconds(2), 128 * 1024, 128 * 1024, Duration.ofSeconds(2),
+                Duration.ofMillis(200), Duration.ofSeconds(1)));
+        Sink live = rtpSink();
+        int nobody = freeRun(1);
+        Brew brew = barista.create(BrewSpec.of("one-dead",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())),
+                List.of(OutputSpec.of("dead", SrtCallerEndpoint.to(HOST, nobody)),
+                        OutputSpec.of("live", RtpSendEndpoint.to(HOST, live.port)))));
+        SrtConnection publisher = srtPublish(srtPort(brew));
+        byte[] ts = TsFixtures.packets(0, 7 * 200);
+
+        send(publisher, ts);
+
+        live.await(ts.length);
+        assertThat(live.bytes()).isEqualTo(ts);
+        EndpointStatus dead = brew.status().outputs().getFirst();
+        assertThat(dead.state()).isIn(EndpointState.CONNECTING, EndpointState.RECONNECTING);
+        assertThat(dead.droppedChunks()).as("it dropped from its own queue").isPositive();
+        assertThat(brew.status().outputs().get(1).droppedChunks()).isZero();
+    }
+
+    @Test
+    void reportsALostSourceAndItsReturn() throws Exception {
+        barista.close();
+        barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1)));
+        List<BrewState> states = new CopyOnWriteArrayList<>();
+        barista.addListener(new BrewListener() {
+            @Override
+            public void onBrewStateChanged(BrewId brew, BrewState from, BrewState to) {
+                states.add(to);
+            }
+        });
+        Brew brew = barista.create(BrewSpec.of("lossy",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())), List.of()));
+        SrtConnection publisher = srtPublish(srtPort(brew));
+
+        send(publisher, TsFixtures.packets(0, 14));
+        await(() -> brew.state() == BrewState.RUNNING, "running");
+        await(() -> brew.state() == BrewState.SOURCE_LOST, "lost after 400 ms of silence");
+        assertThat(brew.status().sources().getFirst().state()).isEqualTo(EndpointState.IDLE);
+        send(publisher, TsFixtures.packets(14, 14));
+        await(() -> brew.state() == BrewState.RUNNING, "running again");
+
+        await(() -> states.containsAll(List.of(BrewState.RUNNING, BrewState.SOURCE_LOST)), "events");
+    }
+
+    /** Restart: the same repository and port ranges bring the brew back on the ports it had. */
+    @Test
+    void comesBackAfterARestartOnTheSamePorts() throws Exception {
+        Sink rtp = rtpSink();
+        Brew before = barista.create(BrewSpec.of("durable",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())),
+                List.of(OutputSpec.of("out", RtpSendEndpoint.to(HOST, rtp.port)))));
+        int port = srtPort(before);
+        barista.close();
+
+        barista = engine(BaristaSettings.defaults());
+        barista.start();
+
+        Brew after = barista.brew(before.id()).orElseThrow();
+        assertThat(srtPort(after)).isEqualTo(port);
+        SrtConnection publisher = srtPublish(port);
+        byte[] ts = TsFixtures.packets(0, 70);
+        send(publisher, ts);
+        rtp.await(ts.length);
+        assertThat(rtp.bytes()).isEqualTo(ts);
+    }
+
+    @Test
+    void aBrewThatCannotBindFailsWithTheReasonAndOthersCarryOn() throws Exception {
+        int taken = freeRun(1);
+        try (DatagramSocket squatter = new DatagramSocket(taken)) {
+            Brew failed = barista.create(BrewSpec.of("collides",
+                    List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any().withPort(taken))), List.of()));
+            Brew fine = barista.create(BrewSpec.of("fine",
+                    List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())), List.of()));
+
+            assertThat(failed.state()).isEqualTo(BrewState.FAILED);
+            assertThat(failed.status().error()).contains("srt-listener encoder");
+            assertThat(fine.state()).isEqualTo(BrewState.STARTING);
+        }
+    }
+
+    /**
+     * A change from one of Barista's own event loops would wait for work that
+     * may need that loop. It is refused at once, and the engine carries on.
+     * (From the Codex review, which showed stop() deadlocking there.)
+     */
+    @Test
+    void refusesChangesFromItsOwnEventLoops() throws Exception {
+        Brew brew = barista.create(BrewSpec.of("loop-call",
+                List.of(SourceSpec.of("in", 0, RtpReceiveEndpoint.unicast())), List.of()));
+
+        io.netty.util.concurrent.Future<?> call = group.next().submit(() -> barista.stop(brew.id()));
+
+        assertThat(call.await(5, TimeUnit.SECONDS)).as("refused at once, not stuck").isTrue();
+        assertThat(call.cause()).isInstanceOf(IllegalStateException.class).hasMessageContaining("event loop");
+        assertThat(brew.state()).isNotEqualTo(BrewState.STOPPED);
+        barista.stop(brew.id());
+        assertThat(brew.state()).isEqualTo(BrewState.STOPPED);
+    }
+
+    /**
+     * Press's sender packs seven TS packets per RTP packet. Three must still go
+     * out while the brew stays open, not wait for four more. (From the Codex review.)
+     */
+    @Test
+    void aShortRunOfTsPacketsLeavesAnRtpOutputPromptly() throws Exception {
+        try (DatagramSocket sink = new DatagramSocket(0, LOOPBACK)) {
+            sink.setSoTimeout(2000);
+            Brew brew = barista.create(BrewSpec.of("short",
+                    List.of(SourceSpec.of("in", 0, RtpReceiveEndpoint.unicast())),
+                    List.of(OutputSpec.of("out", RtpSendEndpoint.to(HOST, sink.getLocalPort())))));
+            RtpSender sender = track(RtpSender.connect(RtpSenderConfig.to(rtpAddress(brew, 0)).withRtcp(false)));
+
+            sender.write(Unpooled.wrappedBuffer(TsFixtures.packets(0, 3)));
+            sender.flush();
+
+            java.net.DatagramPacket datagram = new java.net.DatagramPacket(new byte[2000], 2000);
+            sink.receive(datagram);
+            assertThat(datagram.getLength()).isEqualTo(12 + 3 * 188);
+        }
+    }
+
+    @Test
+    void deleteReleasesPortsForTheNextBrew() {
+        Brew first = barista.create(BrewSpec.of("first",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())), List.of()));
+        int port = srtPort(first);
+
+        barista.delete(first.id());
+        Brew second = barista.create(BrewSpec.of("second",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())), List.of()));
+
+        assertThat(srtPort(second)).isEqualTo(port);
+        assertThat(repository.load("test-node")).extracting(BrewSpec::name).containsExactly("second");
+    }
+
+
+    private DefaultBarista engine(BaristaSettings settings) {
+        return new DefaultBarista(settings, group, NioDatagramChannel.class, repository,
+                new RangePortAllocator(new PortRange(srtFirst, srtFirst + 9), new PortRange(rtpFirst, rtpFirst + 39)),
+                new StaticNodeIdentity("test-node", HOST));
+    }
+
+    private static int srtPort(Brew brew) {
+        return ((SrtListenerEndpoint) brew.spec().sources().getFirst().endpoint()).port();
+    }
+
+    private static InetSocketAddress rtpAddress(Brew brew, int source) {
+        return new InetSocketAddress(LOOPBACK,
+                ((RtpReceiveEndpoint) brew.spec().sources().get(source).endpoint()).port());
+    }
+
+    private SrtConnection srtPublish(int port) throws Exception {
+        SrtConnection connection = SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), "publish")
+                .get(5, TimeUnit.SECONDS);
+        resources.add(connection::close);
+        return connection;
+    }
+
+    /** Writes in 1316-byte pieces, briefly pacing so loopback buffers never overflow. */
+    private static void send(SrtConnection connection, byte[] ts) throws InterruptedException {
+        for (int at = 0; at < ts.length; at += 1316) {
+            connection.write(Unpooled.wrappedBuffer(ts, at, Math.min(1316, ts.length - at)));
+            if ((at / 1316) % 8 == 7) {
+                Thread.sleep(2);
+            }
+        }
+    }
+
+    private static void send(RtpSender sender, byte[] ts) throws InterruptedException {
+        for (int at = 0; at < ts.length; at += 1316) {
+            sender.write(Unpooled.wrappedBuffer(ts, at, Math.min(1316, ts.length - at)));
+            if ((at / 1316) % 8 == 7) {
+                Thread.sleep(2);
+            }
+        }
+        sender.flush();
+    }
+
+    private <T extends AutoCloseable> T track(T resource) {
+        resources.add(resource);
+        return resource;
+    }
+
+    /** Collects bytes arriving at a test peer. */
+    private static final class Sink {
+        final int port;
+        private final ByteArrayOutputStream received = new ByteArrayOutputStream();
+
+        Sink(int port) {
+            this.port = port;
+        }
+
+        void accept(ByteBuf payload) {
+            synchronized (received) {
+                received.writeBytes(ByteBufUtil.getBytes(payload));
+            }
+            payload.release();
+        }
+
+        byte[] bytes() {
+            synchronized (received) {
+                return received.toByteArray();
+            }
+        }
+
+        void await(int length) throws InterruptedException {
+            BaristaIntegrationTest.await(() -> bytes().length >= length,
+                    () -> "received " + bytes().length + " of " + length + " bytes");
+        }
+    }
+
+    private Sink rtpSink() throws Exception {
+        Sink[] holder = new Sink[1];
+        RtpReceiver receiver = RtpReceiver.bind(RtpReceiverConfig.unicast(new InetSocketAddress(LOOPBACK, 0)),
+                pipeline -> pipeline.addLast(new SimpleChannelInboundHandler<ByteBuf>(false) {
+                    @Override
+                    protected void channelRead0(ChannelHandlerContext ctx, ByteBuf payload) {
+                        holder[0].accept(payload);
+                    }
+                }));
+        holder[0] = new Sink(receiver.localAddress().getPort());
+        resources.add(receiver);
+        return holder[0];
+    }
+
+    private Sink srtSink() throws Exception {
+        SrtListener listener = SrtListener.bind(new InetSocketAddress(LOOPBACK, 0));
+        Sink sink = new Sink(listener.localAddress().getPort());
+        listener.setAcceptHandler(request -> AcceptDecision.accept());
+        listener.onConnection(connection -> connection.onData(sink::accept));
+        resources.add(listener::close);
+        return sink;
+    }
+
+    private Sink srtSubscriber(int port) throws Exception {
+        Sink sink = new Sink(port);
+        SrtConnection connection = SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), "pull")
+                .get(5, TimeUnit.SECONDS);
+        connection.onData(sink::accept);
+        resources.add(connection::close);
+        return sink;
+    }
+
+    private static void awaitOutput(Brew brew, String id, EndpointState state) throws InterruptedException {
+        await(() -> brew.status().outputs().stream().anyMatch(o -> o.id().equals(id) && o.state() == state),
+                "output " + id + " " + state);
+    }
+
+    private static void await(BooleanSupplier condition, String what) throws InterruptedException {
+        await(condition, () -> what);
+    }
+
+    private static void await(BooleanSupplier condition, java.util.function.Supplier<String> what)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+        while (!condition.getAsBoolean()) {
+            if (System.nanoTime() > deadline) {
+                throw new AssertionError("timed out waiting for " + what.get());
+            }
+            Thread.sleep(10);
+        }
+    }
+
+    private static byte[] concat(byte[] a, byte[] b) {
+        byte[] both = new byte[a.length + b.length];
+        System.arraycopy(a, 0, both, 0, a.length);
+        System.arraycopy(b, 0, both, a.length, b.length);
+        return both;
+    }
+
+    /** A run of free ports, so allocated ports are not taken by something else on the machine. */
+    private static int freeRun(int length) throws IOException {
+        for (int attempt = 0; attempt < 100; attempt++) {
+            int base;
+            try (DatagramSocket probe = new DatagramSocket(0)) {
+                base = probe.getLocalPort() / 10 * 10;
+            }
+            boolean free = base > 1024 && base + length < 65535;
+            for (int offset = 0; free && offset < length; offset++) {
+                try (DatagramSocket socket = new DatagramSocket(base + offset)) {
+                    // free
+                } catch (SocketException e) {
+                    free = false;
+                }
+            }
+            if (free) {
+                return base;
+            }
+        }
+        throw new IOException("no run of " + length + " free ports");
+    }
+}

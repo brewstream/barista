@@ -1,0 +1,14 @@
+description = 'Barista: the BrewStream relay engine. Flows, topology and protocol conversion over Roast (SRT) and Press (RTP)'
+
+dependencies {
+    // Engine is plain Java: no Spring here, so it stays embeddable and testable without a context.
+    api platform("io.netty:netty-bom:${nettyVersion}")
+    api "io.github.brewstream:roast:${roastVersion}"
+    api "io.github.brewstream:press:${pressVersion}"
+    api "io.github.brewstream:grind-core:${grindVersion}"
+    implementation "io.github.brewstream:grind-netty:${grindVersion}"
+}
+
+base {
+    archivesName = 'barista-core'
+}

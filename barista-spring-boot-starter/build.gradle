@@ -1,0 +1,16 @@
+description = 'Spring Boot auto-configuration for Barista: engine beans with defaults an application can replace'
+
+dependencies {
+    api project(':barista-core')
+    api platform("org.springframework.boot:spring-boot-dependencies:${springBootVersion}")
+    api 'org.springframework.boot:spring-boot-autoconfigure'
+    annotationProcessor platform("org.springframework.boot:spring-boot-dependencies:${springBootVersion}")
+    annotationProcessor 'org.springframework.boot:spring-boot-configuration-processor'
+
+    testImplementation 'org.springframework.boot:spring-boot-test'
+    testImplementation 'org.springframework:spring-test'
+}
+
+base {
+    archivesName = 'barista-spring-boot-starter'
+}
