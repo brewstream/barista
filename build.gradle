@@ -61,6 +61,52 @@ subprojects {
     }
 }
 
+// Both modules publish to Maven Central as io.github.brewstream:<module name>,
+// with the same POM apart from the name. The tag is the version (release.yml).
+def displayNames = ['barista-core': 'Barista Core', 'barista-spring-boot-starter': 'Barista Spring Boot Starter']
+
+subprojects {
+    apply plugin: 'com.vanniktech.maven.publish'
+
+    mavenPublishing {
+        publishToMavenCentral(com.vanniktech.maven.publish.SonatypeHost.CENTRAL_PORTAL)
+        if (project.findProperty('signing.gnupg.keyName') || project.findProperty('signingInMemoryKey')) {
+            signAllPublications()
+        }
+
+        coordinates(project.group.toString(), project.name, project.version.toString())
+
+        pom {
+            name = displayNames[project.name]
+            description = project.description
+            url = 'https://github.com/brewstream/barista'
+            inceptionYear = '2026'
+
+            licenses {
+                license {
+                    name = 'The Apache License, Version 2.0'
+                    url = 'https://www.apache.org/licenses/LICENSE-2.0.txt'
+                    distribution = 'repo'
+                }
+            }
+
+            developers {
+                developer {
+                    id = 'viniciusccarvalho'
+                    name = 'Vinicius Carvalho'
+                    url = 'https://github.com/viniciusccarvalho'
+                }
+            }
+
+            scm {
+                connection = 'scm:git:git://github.com/brewstream/barista.git'
+                developerConnection = 'scm:git:ssh://github.com:brewstream/barista.git'
+                url = 'https://github.com/brewstream/barista'
+            }
+        }
+    }
+}
+
 // One check over every module's sources, run once from the root.
 tasks.register('licenseCheck', Exec) {
     description = 'Fails if any Java source is missing the Apache 2.0 header.'
