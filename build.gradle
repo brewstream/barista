@@ -1,0 +1,72 @@
+plugins {
+    id 'com.vanniktech.maven.publish' version '0.30.0' apply false
+}
+
+ext {
+    nettyVersion = '4.2.17.Final'
+    springBootVersion = '4.1.1'
+    roastVersion = '0.1.3'
+    pressVersion = '0.1.0'
+    grindVersion = '0.1.1'
+}
+
+subprojects {
+    apply plugin: 'java-library'
+
+    // io.github.brewstream for the same reason as Roast and Press: Central verifies the
+    // group against the GitHub org; the Java packages stay org.brewstream.barista.
+    group = findProperty('publishGroup') ?: 'io.github.brewstream'
+    version = findProperty('version') != 'unspecified' ? findProperty('version') : '0.1.0-SNAPSHOT'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+    }
+
+    repositories {
+        mavenCentral()
+    }
+
+    dependencies {
+        testImplementation platform('org.junit:junit-bom:5.11.4')
+        testImplementation 'org.junit.jupiter:junit-jupiter'
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+        testImplementation 'org.assertj:assertj-core:3.27.7'
+        testImplementation 'org.mockito:mockito-core:5.23.0'
+        testImplementation 'org.mockito:mockito-junit-jupiter:5.23.0'
+    }
+
+    javadoc {
+        options.addStringOption('Xdoclint:all,-missing', '-quiet')
+    }
+
+    test {
+        useJUnitPlatform {
+            excludeTags 'interop'
+        }
+    }
+
+    tasks.register('interopTest', Test) {
+        description = 'Runs interop tests against real peers (ffmpeg, srt-live-transmit). Skips itself when absent.'
+        group = 'verification'
+        testClassesDirs = sourceSets.test.output.classesDirs
+        classpath = sourceSets.test.runtimeClasspath
+        useJUnitPlatform {
+            includeTags 'interop'
+        }
+        testLogging {
+            events 'passed', 'skipped', 'failed'
+        }
+    }
+}
+
+// One check over every module's sources, run once from the root.
+tasks.register('licenseCheck', Exec) {
+    description = 'Fails if any Java source is missing the Apache 2.0 header.'
+    group = 'verification'
+    commandLine "${rootDir}/scripts/license-header.sh", '--check'
+}
+subprojects {
+    tasks.matching { it.name == 'check' }.configureEach { dependsOn rootProject.tasks.named('licenseCheck') }
+}
