@@ -13,7 +13,12 @@ Barista is not a server. It is beans an application composes:
 | `barista-core` | the engine, plain Java |
 | `barista-spring-boot-starter` | auto-configuration: engine beans with defaults an application can replace |
 
-**Status:** first version, not yet released.
+**Status:** first release, 0.1.0. Java 21.
+
+```groovy
+implementation 'io.github.brewstream:barista-spring-boot-starter:0.1.0'   // Spring Boot
+implementation 'io.github.brewstream:barista-core:0.1.0'                  // the engine alone
+```
 
 ## A brew
 
