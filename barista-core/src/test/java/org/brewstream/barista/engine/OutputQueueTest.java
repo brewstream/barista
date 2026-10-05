@@ -118,4 +118,31 @@ class OutputQueueTest {
         assertThat(queue.dropped()).isEqualTo(4);
         queue.clear();
     }
+
+    /** How far behind: drops since the queue last ran empty, starting again once it has. (#10) */
+    @Test
+    void tracksHowFarBehindUntilTheQueueRunsEmpty() {
+        OutputQueue queue = new OutputQueue(200);
+        assertThat(queue.behindDroppedBytes()).isZero();
+        for (int i = 0; i < 5; i++) {
+            queue.offer(Unpooled.buffer(100).writeZero(100));
+        }
+        long since = queue.behindSinceNanos();
+        assertThat(queue.behindDroppedBytes()).isEqualTo(300);
+        assertThat(since).isPositive();
+
+        queue.offer(Unpooled.buffer(100).writeZero(100));
+        assertThat(queue.behindDroppedBytes()).as("still behind: it never ran empty").isEqualTo(400);
+        assertThat(queue.behindSinceNanos()).isEqualTo(since);
+
+        queue.poll().release();
+        queue.poll().release();
+        assertThat(queue.poll()).as("ran empty").isNull();
+        for (int i = 0; i < 3; i++) {
+            queue.offer(Unpooled.buffer(100).writeZero(100));
+        }
+        assertThat(queue.behindDroppedBytes()).as("a new run of drops").isEqualTo(100);
+        assertThat(queue.behindSinceNanos()).isGreaterThan(since);
+        queue.clear();
+    }
 }

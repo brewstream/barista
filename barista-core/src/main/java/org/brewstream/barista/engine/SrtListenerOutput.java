@@ -21,6 +21,7 @@ import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.spec.OutputSpec;
+import org.brewstream.barista.spec.SlowSubscriberPolicy;
 import org.brewstream.barista.spec.SrtListenerEndpoint;
 import org.brewstream.roast.socket.AcceptDecision;
 import org.brewstream.roast.socket.SrtConfig;
@@ -30,6 +31,7 @@ import org.brewstream.roast.socket.SrtListener;
 import java.net.InetSocketAddress;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -39,7 +41,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 final class SrtListenerOutput extends OutputLeg {
 
-    private record Subscriber(SrtConnection connection, Lane lane, long since) {
+    private record Subscriber(SrtConnection connection, Lane lane, long since, AtomicBoolean disconnected) {
     }
 
     private final SrtListenerEndpoint endpoint;
@@ -79,15 +81,19 @@ final class SrtListenerOutput extends OutputLeg {
                 }
             });
             connection.pipeline().addLast(SrtSupport.writability(lane));
-            Subscriber subscriber = new Subscriber(connection, lane, System.currentTimeMillis());
+            Subscriber subscriber = new Subscriber(connection, lane, System.currentTimeMillis(), new AtomicBoolean());
             String who = SrtSupport.describe(connection);
-            lane.queue().onDrop(() -> event(EndpointEvent.Kind.DROPPING,
-                    "subscriber " + who + " is slower than the stream: dropping oldest"));
+            lane.queue().onDrop(() -> {
+                event(EndpointEvent.Kind.DROPPING, "subscriber " + who + " is slower than the stream: dropping oldest");
+                disconnectIfTooFarBehind(subscriber, who);
+            });
             subscribers.add(subscriber);
             event(EndpointEvent.Kind.CONNECTED, "subscriber " + who);
             connection.onClose(() -> {
                 if (subscribers.remove(subscriber)) {
-                    event(EndpointEvent.Kind.DISCONNECTED, "subscriber " + who + " went away (cause unknown)");
+                    if (!subscriber.disconnected().get()) {
+                        event(EndpointEvent.Kind.DISCONNECTED, "subscriber " + who + " went away (cause unknown)");
+                    }
                     droppedByDeparted.addAndGet(lane.queue().dropped());
                     lane.queue().clear();
                 }
@@ -97,6 +103,33 @@ final class SrtListenerOutput extends OutputLeg {
         });
         event(EndpointEvent.Kind.STARTED, "listening on " + context.publishedHost() + ":" + endpoint.port());
         state(EndpointState.WAITING);
+    }
+
+    /** On the brew loop, after a drop: applies the slow-subscriber policy. */
+    private void disconnectIfTooFarBehind(Subscriber subscriber, String who) {
+        SlowSubscriberPolicy policy = endpoint.slowSubscribers();
+        if (policy.action() != SlowSubscriberPolicy.Action.DISCONNECT || subscriber.disconnected().get()) {
+            return;
+        }
+        OutputQueue queue = subscriber.lane().queue();
+        String why = tooFarBehind(policy, queue.behindDroppedBytes(), queue.capacity(),
+                System.nanoTime() - queue.behindSinceNanos());
+        if (why != null && subscriber.disconnected().compareAndSet(false, true)) {
+            event(EndpointEvent.Kind.DISCONNECTED, "subscriber " + who + " disconnected: " + why
+                    + " (slow-subscriber policy)");
+            subscriber.connection().close();
+        }
+    }
+
+    /** Why a subscriber this far behind is too far behind, or {@code null} if it is not. */
+    static String tooFarBehind(SlowSubscriberPolicy policy, long droppedBytes, long capacityBytes, long behindNanos) {
+        if (droppedBytes >= policy.maxDroppedCapacities() * capacityBytes) {
+            return "dropped " + droppedBytes / 1024 + " KiB without catching up";
+        }
+        if (behindNanos >= policy.maxBehindTime().toNanos()) {
+            return "behind for " + behindNanos / 1_000_000 + " ms";
+        }
+        return null;
     }
 
     @Override

@@ -38,6 +38,11 @@ final class OutputQueue {
     private final AtomicLong dropped = new AtomicLong();
     private volatile long capacityBytes;
     private volatile Runnable onDrop = () -> { };
+    // How far behind: bytes dropped since the queue last ran empty, and since when.
+    // Written where chunks are offered; poll() only flags that the queue ran empty.
+    private long behindDroppedBytes;
+    private long behindSinceNanos;
+    private volatile boolean ranEmpty = true;
 
     OutputQueue(long capacityBytes) {
         this.capacityBytes = capacityBytes;
@@ -53,6 +58,12 @@ final class OutputQueue {
             if (oldest == null) {
                 return;
             }
+            if (ranEmpty) {
+                ranEmpty = false;
+                behindDroppedBytes = 0;
+                behindSinceNanos = System.nanoTime();
+            }
+            behindDroppedBytes += oldest.readableBytes();
             queuedBytes.addAndGet(-oldest.readableBytes());
             dropped.incrementAndGet();
             oldest.release();
@@ -65,6 +76,8 @@ final class OutputQueue {
         ByteBuf chunk = chunks.poll();
         if (chunk != null) {
             queuedBytes.addAndGet(-chunk.readableBytes());
+        } else {
+            ranEmpty = true;
         }
         return chunk;
     }
@@ -92,6 +105,16 @@ final class OutputQueue {
 
     long queuedBytes() {
         return queuedBytes.get();
+    }
+
+    /** Bytes dropped since the queue last ran empty. Read where chunks are offered, e.g. in onDrop. */
+    long behindDroppedBytes() {
+        return behindDroppedBytes;
+    }
+
+    /** When the current run of drops began ({@link System#nanoTime()}). Read where chunks are offered. */
+    long behindSinceNanos() {
+        return behindSinceNanos;
     }
 
     long dropped() {

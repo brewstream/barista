@@ -40,6 +40,7 @@ import org.brewstream.barista.TsFixtures;
 import org.brewstream.barista.spec.BrewId;
 import org.brewstream.barista.spec.BrewSpec;
 import org.brewstream.barista.spec.FailoverPolicy;
+import org.brewstream.barista.spec.SlowSubscriberPolicy;
 import org.brewstream.barista.spec.OutputSpec;
 import org.brewstream.barista.spec.RtpReceiveEndpoint;
 import org.brewstream.barista.spec.RtpSendEndpoint;
@@ -57,6 +58,7 @@ import org.brewstream.press.net.RtpSender;
 import org.brewstream.press.net.RtpSenderConfig;
 import org.brewstream.roast.socket.AcceptDecision;
 import org.brewstream.roast.socket.SrtCaller;
+import org.brewstream.roast.socket.SrtConfig;
 import org.brewstream.roast.socket.SrtConnection;
 import org.brewstream.roast.socket.SrtListener;
 import org.junit.jupiter.api.AfterEach;
@@ -699,6 +701,90 @@ class BaristaIntegrationTest {
 
         await(() -> brew.keyframe().isPresent(), "a keyframe after the ask");
         assertThat(brew.keyframe().orElseThrow().codec()).startsWith("avc1.");
+    }
+
+    /**
+     * Under the disconnect policy, a subscriber that stops reading is disconnected once it
+     * has dropped a queue's worth, with the reason in the history; the other subscriber gets
+     * every byte. (#10)
+     */
+    @Test
+    void disconnectsASubscriberThatStopsReading() throws Exception {
+        Brew brew = slowSubscriberBrew(SlowSubscriberPolicy.disconnect().withMaxDroppedCapacities(1));
+        int port = outputPort(brew);
+        Sink live = srtSubscriber(port);
+        stalledSubscriber(port);
+        await(() -> brew.status().outputs().getFirst().connections().size() == 2, "two subscribers");
+        byte[] ts = TsFixtures.packets(0, 7 * 1200);
+        long start = System.nanoTime();
+
+        send(srtPublish(srtPort(brew)), ts);
+
+        live.await(ts.length);
+        assertThat(live.bytes()).as("the reading subscriber is unaffected").isEqualTo(ts);
+        await(() -> brew.status().outputs().getFirst().connections().size() == 1, "stalled one disconnected");
+        assertThat(System.nanoTime() - start).as("by the policy, well before SRT's 5 s peer idle timeout")
+                .isLessThan(TimeUnit.SECONDS.toNanos(3));
+        assertThat(reason(brew.status().outputs().getFirst().history(), EndpointEvent.Kind.DISCONNECTED))
+                .startsWith("subscriber ").contains(" disconnected: dropped ")
+                .endsWith(" KiB without catching up (slow-subscriber policy)");
+    }
+
+    /** Under drop-oldest, the default, the same subscriber stays connected and drops. (#10) */
+    @Test
+    void keepsASlowSubscriberUnderDropOldest() throws Exception {
+        Brew brew = slowSubscriberBrew(SlowSubscriberPolicy.dropOldest());
+        int port = outputPort(brew);
+        Sink live = srtSubscriber(port);
+        stalledSubscriber(port);
+        await(() -> brew.status().outputs().getFirst().connections().size() == 2, "two subscribers");
+        byte[] ts = TsFixtures.packets(0, 7 * 1200);
+
+        send(srtPublish(srtPort(brew)), ts);
+
+        live.await(ts.length);
+        EndpointStatus output = brew.status().outputs().getFirst();
+        assertThat(output.droppedChunks()).as("the stalled one dropped").isPositive();
+        assertThat(output.connections()).hasSize(2);
+        assertThat(kindsOf(output)).doesNotContain(EndpointEvent.Kind.DISCONNECTED);
+    }
+
+    /** A 128 KiB queue per subscriber, so a stalled one overflows on a 1.5 MB stream. */
+    private Brew slowSubscriberBrew(SlowSubscriberPolicy policy) {
+        barista.close();
+        barista = engine(new BaristaSettings(Duration.ofSeconds(2), 128 * 1024, 128 * 1024, Duration.ofSeconds(2),
+                Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0, Duration.ofSeconds(30)));
+        return barista.create(BrewSpec.of("fan",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())),
+                List.of(OutputSpec.of("pull", SrtListenerEndpoint.any().withSlowSubscribers(policy)))));
+    }
+
+    private static int outputPort(Brew brew) {
+        return ((SrtListenerEndpoint) brew.spec().outputs().getFirst().endpoint()).port();
+    }
+
+    /**
+     * A subscriber that stops reading: connected with a small receive window on an event
+     * loop of its own, which is then blocked, so it neither reads nor acknowledges.
+     */
+    private void stalledSubscriber(int port) throws Exception {
+        EventLoopGroup own = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        resources.add(() -> {
+            release.countDown();
+            own.shutdownGracefully(0, 1, TimeUnit.SECONDS).sync();
+        });
+        SrtConnection connection = SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), "pull", null, 0,
+                SrtConfig.defaults().withFlowWindowPackets(32),
+                org.brewstream.roast.socket.SrtTransport.shared(own.next(), NioDatagramChannel.class))
+                .get(5, TimeUnit.SECONDS);
+        connection.channel().eventLoop().execute(() -> {
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
     }
 
     /** Keeps an RTP source fed, in order, until closed. */
