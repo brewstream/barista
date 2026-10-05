@@ -17,9 +17,12 @@
 package org.brewstream.barista.engine;
 
 import io.netty.buffer.ByteBuf;
+import org.brewstream.barista.ConnectionView;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.spec.SourceSpec;
+
+import java.util.List;
 
 /**
  * A source: delivers payloads on the brew loop, which are aligned into TS chunks,
@@ -54,9 +57,8 @@ abstract class SourceLeg extends Leg {
     /** The address in the status. */
     abstract String address();
 
-    abstract int connections();
-
-    abstract Object transportStats();
+    /** Every connection on this source, with its statistics. */
+    abstract List<ConnectionView> connections();
 
     /** On the brew loop: ACTIVE while data is fresh, IDLE once it is not. */
     void tick(long nowNanos, long lossNanos) {
@@ -83,6 +85,6 @@ abstract class SourceLeg extends Leg {
     @Override
     EndpointStatus status() {
         return new EndpointStatus(id, kind, address(), state(), connections(), monitor.chunks(), monitor.bytes(),
-                0, aligner.discardedBytes(), monitor.health(), transportStats(), error);
+                0, aligner.discardedBytes(), monitor.health(), error);
     }
 }

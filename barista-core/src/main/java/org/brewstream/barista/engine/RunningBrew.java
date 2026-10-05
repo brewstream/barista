@@ -159,7 +159,7 @@ final class RunningBrew implements Brew, BrewContext {
     }
 
     private static EndpointStatus idle(String id) {
-        return new EndpointStatus(id, null, null, EndpointState.STOPPED, 0, 0, 0, 0, 0, null, null, null);
+        return new EndpointStatus(id, null, null, EndpointState.STOPPED, List.of(), 0, 0, 0, 0, null, null);
     }
 
 

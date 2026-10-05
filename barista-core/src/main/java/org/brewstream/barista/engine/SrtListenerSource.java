@@ -16,6 +16,7 @@
 
 package org.brewstream.barista.engine;
 
+import org.brewstream.barista.ConnectionView;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.spec.SourceSpec;
 import org.brewstream.barista.spec.SrtListenerEndpoint;
@@ -26,6 +27,7 @@ import org.brewstream.roast.socket.SrtConnection;
 import org.brewstream.roast.socket.SrtListener;
 
 import java.net.InetSocketAddress;
+import java.util.List;
 
 /**
  * An SRT listener an encoder publishes to. One publisher at a time: a second
@@ -37,6 +39,7 @@ final class SrtListenerSource extends SourceLeg {
     private final SrtListenerEndpoint endpoint;
     private SrtListener listener;
     private volatile SrtConnection publisher;
+    private volatile long publisherSince;
 
     SrtListenerSource(SourceSpec spec, SrtListenerEndpoint endpoint, BrewContext context) {
         super(spec, "srt-listener", context);
@@ -52,6 +55,7 @@ final class SrtListenerSource extends SourceLeg {
                 : SrtSupport.admit(request, endpoint.streamId(), endpoint.security()));
         // On the brew loop, before the caller's first packet.
         listener.onConnection(connection -> {
+            publisherSince = System.currentTimeMillis();
             publisher = connection;
             connection.onData(this::receive);
             connection.onClose(() -> {
@@ -76,14 +80,9 @@ final class SrtListenerSource extends SourceLeg {
     }
 
     @Override
-    int connections() {
-        return publisher == null ? 0 : 1;
-    }
-
-    @Override
-    Object transportStats() {
+    List<ConnectionView> connections() {
         SrtConnection current = publisher;
-        return current == null ? null : current.stats();
+        return current == null ? List.of() : List.of(Connections.srt(current, publisherSince));
     }
 
     @Override

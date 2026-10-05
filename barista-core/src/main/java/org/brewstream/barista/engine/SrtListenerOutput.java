@@ -37,7 +37,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 final class SrtListenerOutput extends OutputLeg {
 
-    private record Subscriber(SrtConnection connection, Lane lane) {
+    private record Subscriber(SrtConnection connection, Lane lane, long since) {
     }
 
     private final SrtListenerEndpoint endpoint;
@@ -70,7 +70,7 @@ final class SrtListenerOutput extends OutputLeg {
                 }
             });
             connection.pipeline().addLast(SrtSupport.writability(lane));
-            Subscriber subscriber = new Subscriber(connection, lane);
+            Subscriber subscriber = new Subscriber(connection, lane, System.currentTimeMillis());
             subscribers.add(subscriber);
             connection.onClose(() -> {
                 if (subscribers.remove(subscriber)) {
@@ -126,6 +126,7 @@ final class SrtListenerOutput extends OutputLeg {
             dropped += subscriber.lane().queue().dropped();
         }
         return new EndpointStatus(id, kind, context.publishedHost() + ":" + endpoint.port(), state(),
-                subscribers.size(), monitor.chunks(), monitor.bytes(), dropped, 0, monitor.health(), null, error);
+                subscribers.stream().map(s -> Connections.srt(s.connection(), s.since())).toList(),
+                monitor.chunks(), monitor.bytes(), dropped, 0, monitor.health(), error);
     }
 }

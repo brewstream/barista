@@ -27,6 +27,7 @@ import org.brewstream.press.net.RtpSenderConfig;
 import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.SocketException;
+import java.util.List;
 
 /**
  * Sends RTP through a Press sender, with FEC if configured. Chunks are whole TS
@@ -37,6 +38,7 @@ final class RtpSendOutput extends OutputLeg {
     private final RtpSendEndpoint endpoint;
     private final Lane lane;
     private volatile RtpSender sender;
+    private volatile long openedSince;
 
     RtpSendOutput(OutputSpec spec, RtpSendEndpoint endpoint, BrewContext context) {
         super(spec, "rtp-send", context);
@@ -73,6 +75,7 @@ final class RtpSendOutput extends OutputLeg {
             config = config.withInterface(NetworkInterface.getByName(endpoint.networkInterface()));
         }
         sender = RtpSender.connect(config, context.pressTransport(loop));
+        openedSince = System.currentTimeMillis();
         state(EndpointState.ACTIVE);
     }
 
@@ -103,8 +106,9 @@ final class RtpSendOutput extends OutputLeg {
     @Override
     EndpointStatus status() {
         RtpSender current = sender;
-        return new EndpointStatus(id, kind, endpoint.host() + ":" + endpoint.port(), state(), current == null ? 0 : 1,
-                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.health(),
-                current == null ? null : current.stats(), error);
+        String destination = endpoint.host() + ":" + endpoint.port();
+        return new EndpointStatus(id, kind, destination, state(),
+                current == null ? List.of() : List.of(Connections.rtpSend(current.stats(), destination, openedSince)),
+                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.health(), error);
     }
 }

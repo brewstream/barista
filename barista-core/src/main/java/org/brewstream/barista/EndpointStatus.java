@@ -18,6 +18,8 @@ package org.brewstream.barista;
 
 import org.brewstream.grind.TsStreamStats;
 
+import java.util.List;
+
 /**
  * One source or output, as of the snapshot.
  *
@@ -26,16 +28,16 @@ import org.brewstream.grind.TsStreamStats;
  * @param address        for a listening endpoint, where callers dial it (published host and
  *                       port); otherwise the remote address it dials or sends to
  * @param state          see {@link EndpointState}
- * @param connections    connected peers: publishers or subscribers for SRT listeners, 0 or 1
- *                       for callers
+ * @param connections    every connection on this leg, each with its own statistics: the
+ *                       publisher of an SRT listener source, each subscriber of an SRT listener
+ *                       output, the peer of a caller, the RTP sender or receiver. Empty when
+ *                       nothing is connected
  * @param chunks         TS chunks passed: received for a source, sent for an output
  * @param bytes          bytes in those chunks
  * @param droppedChunks  for an output: chunks discarded because its queue was full (a slow
  *                       or disconnected peer); 0 for a source
  * @param discardedBytes for a source: bytes that were not part of any TS packet
  * @param health         TS health on this leg from Grind, or {@code null} before any data
- * @param transport      the transport's own statistics (Roast {@code ConnectionStats}, Press
- *                       {@code ReceiverStats} or {@code SenderStats}), or {@code null}
  * @param error          why the endpoint failed, or {@code null}
  */
 public record EndpointStatus(
@@ -43,12 +45,15 @@ public record EndpointStatus(
         String kind,
         String address,
         EndpointState state,
-        int connections,
+        List<ConnectionView> connections,
         long chunks,
         long bytes,
         long droppedChunks,
         long discardedBytes,
         TsStreamStats health,
-        Object transport,
         String error) {
+
+    public EndpointStatus {
+        connections = List.copyOf(connections);
+    }
 }

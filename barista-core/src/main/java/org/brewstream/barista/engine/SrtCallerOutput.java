@@ -26,6 +26,7 @@ import org.brewstream.roast.socket.SrtConfig;
 import org.brewstream.roast.socket.SrtConnection;
 
 import java.net.InetSocketAddress;
+import java.util.List;
 
 /**
  * Pushes to a remote SRT listener, redialling with backoff. While disconnected
@@ -37,6 +38,7 @@ final class SrtCallerOutput extends OutputLeg {
     private final SrtCallerEndpoint endpoint;
     private final Lane lane;
     private Redialer redialer;
+    private volatile long connectedSince;
 
     SrtCallerOutput(OutputSpec spec, SrtCallerEndpoint endpoint, BrewContext context) {
         super(spec, "srt-caller", context);
@@ -67,6 +69,7 @@ final class SrtCallerOutput extends OutputLeg {
                         SrtSupport.passphrase(endpoint.security()), SrtSupport.keyLength(endpoint.security()),
                         SrtConfig.defaults().withLatency(endpoint.latency()), context.srtTransport(loop)),
                 connection -> {
+                    connectedSince = System.currentTimeMillis();
                     lane.queue().clear();
                     connection.pipeline().addLast(SrtSupport.writability(lane));
                     state(EndpointState.ACTIVE);
@@ -99,8 +102,8 @@ final class SrtCallerOutput extends OutputLeg {
     @Override
     EndpointStatus status() {
         SrtConnection current = redialer == null ? null : redialer.connection();
-        return new EndpointStatus(id, kind, endpoint.host() + ":" + endpoint.port(), state(), current == null ? 0 : 1,
-                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.health(),
-                current == null ? null : current.stats(), error);
+        return new EndpointStatus(id, kind, endpoint.host() + ":" + endpoint.port(), state(),
+                current == null ? List.of() : List.of(Connections.srt(current, connectedSince)),
+                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.health(), error);
     }
 }
