@@ -21,6 +21,7 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.EventLoop;
 import io.netty.util.concurrent.ScheduledFuture;
 import org.brewstream.barista.Brew;
+import org.brewstream.barista.BrewKeyframe;
 import org.brewstream.barista.BrewState;
 import org.brewstream.barista.BrewStatus;
 import org.brewstream.barista.EndpointEvent;
@@ -43,6 +44,7 @@ import org.brewstream.roast.socket.SrtTransport;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
@@ -153,6 +155,12 @@ final class RunningBrew implements Brew, BrewContext {
     }
 
     @Override
+    public Optional<BrewKeyframe> keyframe() {
+        SourceLeg current = active;
+        return current == null ? Optional.empty() : Optional.ofNullable(current.keyframe());
+    }
+
+    @Override
     public BrewStatus status() {
         List<EndpointStatus> sourceStatus = new ArrayList<>();
         for (SourceSpec source : spec.sources()) {
@@ -170,7 +178,7 @@ final class RunningBrew implements Brew, BrewContext {
 
     private static EndpointStatus idle(String id) {
         return new EndpointStatus(id, null, null, EndpointState.STOPPED, EndpointHealth.DOWN, List.of(), 0, 0, 0, 0, null,
-                false, List.of(), List.of(), null);
+                false, List.of(), null, List.of(), null);
     }
 
 

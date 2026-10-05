@@ -272,7 +272,7 @@ class BaristaIntegrationTest {
     void continuityErrorsDegradeASourceForAWindow() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
-                Duration.ofSeconds(2), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofMillis(1500), 1.0));
+                Duration.ofSeconds(2), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofMillis(1500), 1.0, Duration.ofSeconds(30)));
         Brew brew = barista.create(BrewSpec.of("damaged",
                 List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())), List.of()));
         SrtConnection publisher = srtPublish(srtPort(brew));
@@ -308,7 +308,7 @@ class BaristaIntegrationTest {
     void aDeadOutputHoldsUpNothingElse() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 128 * 1024, 128 * 1024, Duration.ofSeconds(2),
-                Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
+                Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0, Duration.ofSeconds(30)));
         Sink live = rtpSink();
         int nobody = freeRun(1);
         Brew brew = barista.create(BrewSpec.of("one-dead",
@@ -333,7 +333,7 @@ class BaristaIntegrationTest {
     void reportsALostSourceAndItsReturn() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
-                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0, Duration.ofSeconds(30)));
         List<BrewState> states = new CopyOnWriteArrayList<>();
         barista.addListener(new BrewListener() {
             @Override
@@ -505,7 +505,7 @@ class BaristaIntegrationTest {
     void recordsActivationIdlenessAndAnRtpSender() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
-                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0, Duration.ofSeconds(30)));
         Brew brew = barista.create(BrewSpec.of("pair",
                 List.of(SourceSpec.of("main", 0, RtpReceiveEndpoint.unicast()),
                         SourceSpec.of("backup", 1, RtpReceiveEndpoint.unicast())), List.of()));
@@ -532,7 +532,7 @@ class BaristaIntegrationTest {
     void failsOverToTheNextHealthySourceByPriority() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
-                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0, Duration.ofSeconds(30)));
         List<String> activations = new CopyOnWriteArrayList<>();
         barista.addListener(new BrewListener() {
             @Override
@@ -573,7 +573,7 @@ class BaristaIntegrationTest {
     void failsBackWhenConfigured() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
-                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0, Duration.ofSeconds(30)));
         Brew brew = barista.create(BrewSpec.of("pair",
                 List.of(SourceSpec.of("main", 0, RtpReceiveEndpoint.unicast()),
                         SourceSpec.of("backup", 1, RtpReceiveEndpoint.unicast())), List.of())
@@ -599,7 +599,7 @@ class BaristaIntegrationTest {
     void failsOverFromACallerThatCannotDial() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
-                Duration.ofSeconds(60), Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofSeconds(5), 1.0));
+                Duration.ofSeconds(60), Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofSeconds(5), 1.0, Duration.ofSeconds(30)));
         int nobody = freeRun(1);
         Brew brew = barista.create(BrewSpec.of("dialler",
                 List.of(SourceSpec.of("main", 0, SrtCallerEndpoint.to(HOST, nobody)),
@@ -621,7 +621,7 @@ class BaristaIntegrationTest {
     void aCallerThatReconnectsForgetsItsFailedDials() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
-                Duration.ofSeconds(60), Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofSeconds(5), 1.0));
+                Duration.ofSeconds(60), Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofSeconds(5), 1.0, Duration.ofSeconds(30)));
         int later = freeRun(1);
         List<String> activations = new CopyOnWriteArrayList<>();
         barista.addListener(new BrewListener() {
@@ -674,6 +674,31 @@ class BaristaIntegrationTest {
         EndpointStatus output = brew.status().outputs().getFirst();
         assertThat(output.carriesScte35()).isFalse();
         assertThat(output.spliceMarkers()).isEmpty();
+    }
+
+    /**
+     * The video cue is on the status before anyone asks; a keyframe comes only after an
+     * ask, from the stream that follows it. (#9)
+     */
+    @Test
+    void capturesAKeyframeOnlyAfterItIsAskedFor() throws Exception {
+        Brew brew = barista.create(BrewSpec.of("thumbnail",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())), List.of()));
+        byte[] ts;
+        try (java.io.InputStream in = BaristaIntegrationTest.class.getResourceAsStream("/keyframe-h264.ts")) {
+            ts = in.readAllBytes();
+        }
+        SrtConnection publisher = srtPublish(srtPort(brew));
+
+        send(publisher, ts);
+        await(() -> brew.status().sources().getFirst().bytes() == ts.length, "first pass delivered");
+        assertThat(brew.status().sources().getFirst().videoCodec()).isEqualTo("H.264 / AVC");
+        assertThat(brew.keyframe()).as("nothing extracted before the first ask").isEmpty();
+
+        send(publisher, ts);
+
+        await(() -> brew.keyframe().isPresent(), "a keyframe after the ask");
+        assertThat(brew.keyframe().orElseThrow().codec()).startsWith("avc1.");
     }
 
     /** Keeps an RTP source fed, in order, until closed. */

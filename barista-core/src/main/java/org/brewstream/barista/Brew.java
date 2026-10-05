@@ -20,6 +20,8 @@ import org.brewstream.barista.spec.BrewId;
 import org.brewstream.barista.spec.BrewSpec;
 import org.brewstream.barista.spec.SourceId;
 
+import java.util.Optional;
+
 /**
  * A brew as it runs: one or more sources, exactly one of them active, feeding
  * any number of outputs. Every source stays connected and monitored whether it
@@ -36,6 +38,15 @@ public interface Brew {
 
     /** The source currently feeding the outputs. */
     SourceId activeSource();
+
+    /**
+     * The latest self-contained keyframe of the active source, for a thumbnail, or
+     * empty until one is captured. Keyframes are extracted only on demand: each call
+     * keeps extraction running on the active source for the keyframe demand window
+     * (30 s by default), so the first call usually returns empty and a later one, a
+     * keyframe interval or so after, returns a picture. H.264 and HEVC only.
+     */
+    Optional<BrewKeyframe> keyframe();
 
     /** A snapshot of every endpoint's state, traffic and stream health. */
     BrewStatus status();

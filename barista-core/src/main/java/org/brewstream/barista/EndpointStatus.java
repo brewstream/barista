@@ -44,6 +44,9 @@ import java.util.List;
  *                       breaks). Always false for an output
  * @param spliceMarkers  for a source: the last 20 SCTE-35 markers, oldest first, copies of
  *                       one section counted as one. Always empty for an output
+ * @param videoCodec     for a source: its first video track's codec from the program map, e.g.
+ *                       {@code H.264 / AVC}, known before any keyframe is asked for; {@code null}
+ *                       without video, and always for an output. Keyframes need H.264 or HEVC
  * @param history        what happened to this leg and why, oldest first, at most the last 50
  *                       events (consecutive repeats count as one)
  * @param error          why the endpoint failed, or {@code null}
@@ -62,6 +65,7 @@ public record EndpointStatus(
         TsStreamStats tsStats,
         boolean carriesScte35,
         List<SpliceMarker> spliceMarkers,
+        String videoCodec,
         List<EndpointEvent> history,
         String error) {
 

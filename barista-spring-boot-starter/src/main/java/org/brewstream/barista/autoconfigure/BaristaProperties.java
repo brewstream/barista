@@ -32,6 +32,7 @@ import java.time.Duration;
  * @param queueTime         how much input each output may hold for a slow peer
  * @param sourceLossTimeout silence after which the active source counts as lost
  * @param health            when a leg's health word is {@code DEGRADED}
+ * @param keyframeDemandWindow how long keyframe extraction runs on a source after each ask
  */
 @ConfigurationProperties("barista")
 public record BaristaProperties(
@@ -40,7 +41,8 @@ public record BaristaProperties(
         @DefaultValue("0") int eventLoopThreads,
         @DefaultValue("2s") Duration queueTime,
         @DefaultValue("2s") Duration sourceLossTimeout,
-        @DefaultValue Health health) {
+        @DefaultValue Health health,
+        @DefaultValue("30s") Duration keyframeDemandWindow) {
 
     /**
      * @param id            stable for the life of the node; stored brews are keyed by it.

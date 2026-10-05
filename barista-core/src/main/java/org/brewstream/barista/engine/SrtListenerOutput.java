@@ -143,6 +143,6 @@ final class SrtListenerOutput extends OutputLeg {
         }
         return new EndpointStatus(id, kind, context.publishedHost() + ":" + endpoint.port(), state(), health(),
                 subscribers.stream().map(s -> Connections.srt(s.connection(), s.since())).toList(),
-                monitor.chunks(), monitor.bytes(), dropped, 0, monitor.tsStats(), false, List.of(), history.snapshot(), error);
+                monitor.chunks(), monitor.bytes(), dropped, 0, monitor.tsStats(), false, List.of(), null, history.snapshot(), error);
     }
 }
