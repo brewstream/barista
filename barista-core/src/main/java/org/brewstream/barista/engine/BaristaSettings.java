@@ -35,10 +35,12 @@ import java.util.Objects;
  * @param degradedLossPercent transport loss, as a percentage of packets over a window, above
  *                          which a connected leg is {@code DEGRADED}. See {@link org.brewstream.barista.EndpointHealth}
  *                          for the whole rule
+ * @param keyframeDemandWindow how long keyframe extraction keeps running on a source after
+ *                          {@code Brew.keyframe()} asks for one; each ask extends it
  */
 public record BaristaSettings(Duration queueTime, long minQueueBytes, long maxQueueBytes,
         Duration sourceLossTimeout, Duration reconnectMin, Duration reconnectMax,
-        Duration healthWindow, double degradedLossPercent) {
+        Duration healthWindow, double degradedLossPercent, Duration keyframeDemandWindow) {
 
     public BaristaSettings {
         Objects.requireNonNull(queueTime, "queueTime");
@@ -46,6 +48,7 @@ public record BaristaSettings(Duration queueTime, long minQueueBytes, long maxQu
         Objects.requireNonNull(reconnectMin, "reconnectMin");
         Objects.requireNonNull(reconnectMax, "reconnectMax");
         Objects.requireNonNull(healthWindow, "healthWindow");
+        Objects.requireNonNull(keyframeDemandWindow, "keyframeDemandWindow");
         if (healthWindow.isNegative() || healthWindow.isZero()) {
             throw new IllegalArgumentException("healthWindow must be positive");
         }
@@ -59,10 +62,11 @@ public record BaristaSettings(Duration queueTime, long minQueueBytes, long maxQu
 
     /**
      * 2 s of queue per output (256 KiB to 16 MiB), 2 s source loss, reconnect 0.5 s doubling to
-     * 10 s, health judged over 5 s windows with more than 1% transport loss counting as degraded.
+     * 10 s, health judged over 5 s windows with more than 1% transport loss counting as degraded,
+     * keyframes extracted for 30 s after each ask.
      */
     public static BaristaSettings defaults() {
         return new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024, Duration.ofSeconds(2),
-                Duration.ofMillis(500), Duration.ofSeconds(10), Duration.ofSeconds(5), 1.0);
+                Duration.ofMillis(500), Duration.ofSeconds(10), Duration.ofSeconds(5), 1.0, Duration.ofSeconds(30));
     }
 }

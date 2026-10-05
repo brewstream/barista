@@ -17,6 +17,7 @@
 package org.brewstream.barista.engine;
 
 import io.netty.buffer.ByteBuf;
+import org.brewstream.barista.BrewKeyframe;
 import org.brewstream.barista.ConnectionView;
 import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
@@ -34,13 +35,16 @@ abstract class SourceLeg extends Leg {
 
     final SourceSpec spec;
     private final TsAligner aligner;
-    private final LegMonitor monitor = new LegMonitor(true);
+    private final SourceWatch watch;
+    private final LegMonitor monitor;
     private volatile long lastDataNanos;
 
     SourceLeg(SourceSpec spec, String kind, BrewContext context) {
         super(spec.id().value(), kind, context, true);
         this.spec = spec;
         this.aligner = new TsAligner(context.allocator());
+        this.watch = new SourceWatch(context.settings().keyframeDemandWindow().toNanos());
+        this.monitor = new LegMonitor(watch);
     }
 
     /** Takes ownership of {@code payload}. Must be called on the brew loop. */
@@ -90,6 +94,12 @@ abstract class SourceLeg extends Leg {
         return lastDataNanos != 0;
     }
 
+    /** Asks for keyframes for the next demand window, and returns the latest, or {@code null}. */
+    BrewKeyframe keyframe() {
+        watch.demand();
+        return watch.keyframe();
+    }
+
     /** Releases the aligner's buffer. Call on the brew loop, after the transport is closed. */
     protected final void releaseAligner() {
         context.brewLoop().execute(aligner::release);
@@ -98,7 +108,7 @@ abstract class SourceLeg extends Leg {
     @Override
     EndpointStatus status() {
         return new EndpointStatus(id, kind, address(), state(), health(), connections(), monitor.chunks(), monitor.bytes(),
-                0, aligner.discardedBytes(), monitor.tsStats(), monitor.carriesScte35(), monitor.spliceMarkers(), history.snapshot(),
+                0, aligner.discardedBytes(), monitor.tsStats(), watch.carriesScte35(), watch.spliceMarkers(), watch.videoCodec(), history.snapshot(),
                 error);
     }
 }

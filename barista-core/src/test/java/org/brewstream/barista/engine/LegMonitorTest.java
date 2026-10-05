@@ -18,6 +18,7 @@ package org.brewstream.barista.engine;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import org.brewstream.barista.BrewKeyframe;
 import org.brewstream.barista.SpliceMarker;
 import org.brewstream.grind.TsAnalyzer;
 import org.brewstream.grind.TsPacket;
@@ -44,13 +45,57 @@ import static org.assertj.core.api.Assertions.within;
 class LegMonitorTest {
 
     private static final int CHUNK = 7 * 188;
+    private static final long WINDOW = 30_000_000_000L;
+
+    @Test
+    void knowsTheVideoCodecBeforeAnyoneAsksForAKeyframe() throws IOException {
+        SourceWatch watch = new SourceWatch(WINDOW);
+        feed(new LegMonitor(watch), fixture("/keyframe-h264.ts"), CHUNK);
+
+        assertThat(watch.videoCodec()).isEqualTo("H.264 / AVC");
+        assertThat(watch.extracting()).isFalse();
+        assertThat(watch.keyframe()).as("nobody asked").isNull();
+    }
+
+    @Test
+    void capturesAKeyframeOnceAsked() throws IOException {
+        for (String fixture : List.of("/keyframe-h264.ts", "/keyframe-hevc.ts")) {
+            SourceWatch watch = new SourceWatch(WINDOW);
+            watch.demand();
+            feed(new LegMonitor(watch), fixture(fixture), CHUNK);
+
+            BrewKeyframe keyframe = watch.keyframe();
+            assertThat(keyframe).as(fixture).isNotNull();
+            assertThat(keyframe.codec()).as(fixture).matches("avc1\\..*|hev1\\..*|hvc1\\..*");
+            assertThat(keyframe.data()).as("Annex B").startsWith(0, 0, 0, 1);
+            assertThat(keyframe.capturedAtMillis()).isPositive();
+        }
+    }
+
+    @Test
+    void stopsExtractingWhenTheDemandWindowLapses() throws Exception {
+        byte[] ts = fixture("/keyframe-h264.ts");
+        SourceWatch watch = new SourceWatch(50_000_000L);
+        LegMonitor monitor = new LegMonitor(watch);
+        watch.demand();
+        feed(monitor, ts, CHUNK);
+        BrewKeyframe first = watch.keyframe();
+        assertThat(first).isNotNull();
+
+        Thread.sleep(100);
+        feed(monitor, ts, CHUNK);
+
+        assertThat(watch.extracting()).isFalse();
+        assertThat(watch.keyframe()).as("nothing new captured").isSameAs(first);
+    }
 
     @Test
     void showsEachCueOnceWithItsCopiesCountedAndItsPreRoll() throws IOException {
-        LegMonitor monitor = new LegMonitor(true);
+        SourceWatch watch = new SourceWatch(WINDOW);
+        LegMonitor monitor = new LegMonitor(watch);
         feed(monitor, fixture("/splice.ts"), CHUNK);
 
-        List<SpliceMarker> markers = monitor.spliceMarkers();
+        List<SpliceMarker> markers = watch.spliceMarkers();
         assertThat(markers).as("five sections, each sent twice").hasSize(5)
                 .allSatisfy(marker -> {
                     assertThat(marker.pid()).isEqualTo(500);
@@ -69,39 +114,32 @@ class LegMonitorTest {
 
     @Test
     void carriesScte35IsKnownBeforeTheFirstMarker() throws IOException {
-        LegMonitor monitor = new LegMonitor(true);
+        SourceWatch watch = new SourceWatch(WINDOW);
+        LegMonitor monitor = new LegMonitor(watch);
         byte[] ts = fixture("/splice.ts");
         boolean declaredWithNoMarkerYet = false;
-        for (int at = 0; at < ts.length && monitor.spliceMarkers().isEmpty(); at += 188) {
+        for (int at = 0; at < ts.length && watch.spliceMarkers().isEmpty(); at += 188) {
             feed(monitor, ts, at, 188);
-            declaredWithNoMarkerYet |= monitor.carriesScte35() && monitor.spliceMarkers().isEmpty();
+            declaredWithNoMarkerYet |= watch.carriesScte35() && watch.spliceMarkers().isEmpty();
         }
 
         assertThat(declaredWithNoMarkerYet).isTrue();
-        assertThat(monitor.spliceMarkers()).isNotEmpty();
+        assertThat(watch.spliceMarkers()).isNotEmpty();
     }
 
     @Test
     void aStreamWithoutScte35CarriesNone() throws IOException {
-        LegMonitor monitor = new LegMonitor(true);
+        SourceWatch watch = new SourceWatch(WINDOW);
+        LegMonitor monitor = new LegMonitor(watch);
         feed(monitor, fixture("/sample.ts"), CHUNK);
 
-        assertThat(monitor.carriesScte35()).isFalse();
-        assertThat(monitor.spliceMarkers()).isEmpty();
-    }
-
-    @Test
-    void anOutputDoesNotReadScte35() throws IOException {
-        LegMonitor monitor = new LegMonitor(false);
-        feed(monitor, fixture("/splice.ts"), CHUNK);
-
-        assertThat(monitor.carriesScte35()).isFalse();
-        assertThat(monitor.spliceMarkers()).isEmpty();
+        assertThat(watch.carriesScte35()).isFalse();
+        assertThat(watch.spliceMarkers()).isEmpty();
     }
 
     /**
-     * Reading SCTE-35 costs nothing per packet on a stream that declares no splice PID.
-     * Both monitors first see the whole stream, tables included; then they are fed only
+     * A source's extra reading costs nothing per packet on a stream that declares no splice
+     * PID while nobody asks for keyframes ({@code sample.ts} carries H.264). Both monitors first see the whole stream, tables included; then they are fed only
      * its media packets, where the SCTE-35 path must allocate nothing the analyzer does
      * not. (A new PAT or PMT costs a little, once per table.)
      */
@@ -109,8 +147,8 @@ class LegMonitorTest {
     void addsNoAllocationPerPacketWithoutScte35() throws IOException {
         byte[] ts = fixture("/sample.ts");
         byte[] media = withoutTables(ts);
-        LegMonitor with = new LegMonitor(true);
-        LegMonitor without = new LegMonitor(false);
+        LegMonitor with = new LegMonitor(new SourceWatch(WINDOW));
+        LegMonitor without = new LegMonitor();
         feed(with, ts, CHUNK);
         feed(without, ts, CHUNK);
         for (int i = 0; i < 5; i++) { // warm both paths up

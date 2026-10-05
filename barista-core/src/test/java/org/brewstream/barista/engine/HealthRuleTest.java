@@ -169,7 +169,7 @@ class HealthRuleTest {
 
     private static EndpointStatus status(List<ConnectionView> connections, long dropped, TsStreamStats ts) {
         return new EndpointStatus("leg", "test", "h:1", EndpointState.ACTIVE, EndpointHealth.GOOD, connections,
-                0, 0, dropped, 0, ts, false, List.of(), List.of(), null);
+                0, 0, dropped, 0, ts, false, List.of(), null, List.of(), null);
     }
 
     private static ConnectionView view(String id, TransportStats stats) {

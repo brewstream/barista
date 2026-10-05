@@ -37,6 +37,9 @@ brew.status();                                   // every leg: state, a health w
                                                  // markers on each source, and
                                                  // each connection with typed SRT or RTP stats, and
                                                  // what happened and why ("no answer from 10.0.0.9:9000")
+brew.keyframe();                                 // latest keyframe of the active source, for a
+                                                 // thumbnail decoded in the browser (WebCodecs);
+                                                 // extracted only while someone keeps asking
 barista.activate(brew.id(), new SourceId("backup"));  // or let the brew switch by itself:
 barista.update(brew.spec().withFailover(FailoverPolicy.automatic()));
 barista.update(brew.spec().withOutputs(...));    // outputs join and leave while it runs
