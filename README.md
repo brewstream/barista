@@ -33,7 +33,8 @@ Brew brew = barista.create(BrewSpec.of("studio-feed",
                 OutputSpec.of("partners", SrtListenerEndpoint.any()))));     // subscribers pull here
 
 brew.status();                                   // every leg: state, traffic, TS health (Grind), and
-                                                 // each connection with typed SRT or RTP stats
+                                                 // each connection with typed SRT or RTP stats, and
+                                                 // what happened and why ("no answer from 10.0.0.9:9000")
 barista.activate(brew.id(), new SourceId("backup"));
 barista.update(brew.spec().withOutputs(...));    // outputs join and leave while it runs
 ```

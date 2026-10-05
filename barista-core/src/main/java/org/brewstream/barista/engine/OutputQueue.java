@@ -37,6 +37,7 @@ final class OutputQueue {
     private final AtomicLong queuedBytes = new AtomicLong();
     private final AtomicLong dropped = new AtomicLong();
     private volatile long capacityBytes;
+    private volatile Runnable onDrop = () -> { };
 
     OutputQueue(long capacityBytes) {
         this.capacityBytes = capacityBytes;
@@ -55,6 +56,7 @@ final class OutputQueue {
             queuedBytes.addAndGet(-oldest.readableBytes());
             dropped.incrementAndGet();
             oldest.release();
+            onDrop.run();
         }
     }
 
@@ -73,6 +75,11 @@ final class OutputQueue {
         while ((chunk = poll()) != null) {
             chunk.release();
         }
+    }
+
+    /** Called after each chunk dropped for space. */
+    void onDrop(Runnable action) {
+        onDrop = action;
     }
 
     void capacity(long bytes) {

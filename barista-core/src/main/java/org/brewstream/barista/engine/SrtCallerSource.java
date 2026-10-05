@@ -17,6 +17,7 @@
 package org.brewstream.barista.engine;
 
 import org.brewstream.barista.ConnectionView;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.spec.SourceSpec;
 import org.brewstream.barista.spec.SrtCallerEndpoint;
@@ -49,9 +50,15 @@ final class SrtCallerSource extends SourceLeg {
                 connection -> {
                     connectedSince = System.currentTimeMillis();
                     connection.onData(this::receive);
+                    event(EndpointEvent.Kind.CONNECTED, "connected to " + address());
                     state(EndpointState.ACTIVE);
                 },
-                () -> state(EndpointState.RECONNECTING));
+                () -> {
+                    event(EndpointEvent.Kind.DISCONNECTED, "connection to " + address() + " ended (cause unknown)");
+                    state(EndpointState.RECONNECTING);
+                },
+                failure -> event(EndpointEvent.Kind.FAILED, Reasons.dialFailed(failure, address())));
+        event(EndpointEvent.Kind.STARTED, "dialling " + address());
         state(EndpointState.CONNECTING);
         redialer.start();
     }
@@ -78,6 +85,7 @@ final class SrtCallerSource extends SourceLeg {
             redialer.close();
         }
         releaseAligner();
+        event(EndpointEvent.Kind.STOPPED, "closed");
         state(EndpointState.STOPPED);
     }
 }

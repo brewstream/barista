@@ -25,6 +25,7 @@ import org.brewstream.barista.Barista;
 import org.brewstream.barista.Brew;
 import org.brewstream.barista.BrewListener;
 import org.brewstream.barista.BrewState;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.NodeInfo;
 import org.brewstream.barista.spec.BrewId;
@@ -519,6 +520,11 @@ public final class DefaultBarista implements Barista {
         @Override
         public void sourceActivated(BrewId brew, SourceId source) {
             notifyListeners(l -> l.onSourceActivated(brew, source));
+        }
+
+        @Override
+        public void endpointEvent(BrewId brew, String endpointId, EndpointEvent event) {
+            notifyListeners(l -> l.onEndpointEvent(brew, endpointId, event));
         }
     };
 

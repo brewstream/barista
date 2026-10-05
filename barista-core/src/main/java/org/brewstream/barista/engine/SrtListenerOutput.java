@@ -17,10 +17,12 @@
 package org.brewstream.barista.engine;
 
 import io.netty.buffer.ByteBuf;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.spec.OutputSpec;
 import org.brewstream.barista.spec.SrtListenerEndpoint;
+import org.brewstream.roast.socket.AcceptDecision;
 import org.brewstream.roast.socket.SrtConfig;
 import org.brewstream.roast.socket.SrtConnection;
 import org.brewstream.roast.socket.SrtListener;
@@ -56,7 +58,14 @@ final class SrtListenerOutput extends OutputLeg {
     void open() throws InterruptedException {
         listener = SrtListener.bind(new InetSocketAddress(endpoint.port()),
                 SrtConfig.defaults().withLatency(endpoint.latency()), context.srtTransport(loop));
-        listener.setAcceptHandler(request -> SrtSupport.admit(request, endpoint.streamId(), endpoint.security()));
+        listener.setAcceptHandler(request -> {
+            AcceptDecision decision = SrtSupport.admit(request, endpoint.streamId(), endpoint.security());
+            if (decision instanceof AcceptDecision.Reject rejected) {
+                event(EndpointEvent.Kind.REJECTED, Reasons.refused(rejected.reason(),
+                        SrtSupport.hostPort(request.peerAddress()), request.streamId()));
+            }
+            return decision;
+        });
         listener.onConnection(connection -> {
             Lane lane = new Lane(loop, new OutputQueue(capacity), null, new Lane.Writer() {
                 @Override
@@ -71,9 +80,14 @@ final class SrtListenerOutput extends OutputLeg {
             });
             connection.pipeline().addLast(SrtSupport.writability(lane));
             Subscriber subscriber = new Subscriber(connection, lane, System.currentTimeMillis());
+            String who = SrtSupport.describe(connection);
+            lane.queue().onDrop(() -> event(EndpointEvent.Kind.DROPPING,
+                    "subscriber " + who + " is slower than the stream: dropping oldest"));
             subscribers.add(subscriber);
+            event(EndpointEvent.Kind.CONNECTED, "subscriber " + who);
             connection.onClose(() -> {
                 if (subscribers.remove(subscriber)) {
+                    event(EndpointEvent.Kind.DISCONNECTED, "subscriber " + who + " went away (cause unknown)");
                     droppedByDeparted.addAndGet(lane.queue().dropped());
                     lane.queue().clear();
                 }
@@ -81,6 +95,7 @@ final class SrtListenerOutput extends OutputLeg {
             });
             state(EndpointState.ACTIVE);
         });
+        event(EndpointEvent.Kind.STARTED, "listening on " + context.publishedHost() + ":" + endpoint.port());
         state(EndpointState.WAITING);
     }
 
@@ -116,6 +131,7 @@ final class SrtListenerOutput extends OutputLeg {
         }
         subscribers.forEach(subscriber -> subscriber.lane().queue().clear());
         subscribers.clear();
+        event(EndpointEvent.Kind.STOPPED, "closed");
         state(EndpointState.STOPPED);
     }
 
@@ -127,6 +143,6 @@ final class SrtListenerOutput extends OutputLeg {
         }
         return new EndpointStatus(id, kind, context.publishedHost() + ":" + endpoint.port(), state(),
                 subscribers.stream().map(s -> Connections.srt(s.connection(), s.since())).toList(),
-                monitor.chunks(), monitor.bytes(), dropped, 0, monitor.health(), error);
+                monitor.chunks(), monitor.bytes(), dropped, 0, monitor.health(), history.snapshot(), error);
     }
 }

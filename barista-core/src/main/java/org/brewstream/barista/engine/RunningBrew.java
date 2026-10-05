@@ -23,6 +23,7 @@ import io.netty.util.concurrent.ScheduledFuture;
 import org.brewstream.barista.Brew;
 import org.brewstream.barista.BrewState;
 import org.brewstream.barista.BrewStatus;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.spec.BrewId;
@@ -72,6 +73,8 @@ final class RunningBrew implements Brew, BrewContext {
         void endpointStateChanged(BrewId brew, String endpointId, EndpointState from, EndpointState to);
 
         void sourceActivated(BrewId brew, SourceId source);
+
+        void endpointEvent(BrewId brew, String endpointId, EndpointEvent event);
     }
 
     private final Engine engine;
@@ -159,7 +162,7 @@ final class RunningBrew implements Brew, BrewContext {
     }
 
     private static EndpointStatus idle(String id) {
-        return new EndpointStatus(id, null, null, EndpointState.STOPPED, List.of(), 0, 0, 0, 0, null, null);
+        return new EndpointStatus(id, null, null, EndpointState.STOPPED, List.of(), 0, 0, 0, 0, null, List.of(), null);
     }
 
 
@@ -185,6 +188,7 @@ final class RunningBrew implements Brew, BrewContext {
             return;
         }
         active = sources.get(spec.preferredSource().id());
+        active.event(EndpointEvent.Kind.ACTIVATED, "preferred source at start");
         publishOutputs();
         startedNanos = System.nanoTime();
         tick = brewLoop.scheduleAtFixedRate(this::onTick, TICK_MILLIS, TICK_MILLIS, TimeUnit.MILLISECONDS);
@@ -258,6 +262,7 @@ final class RunningBrew implements Brew, BrewContext {
                 || sources.get(current.spec.id()) != current) {
             SourceLeg preferred = sources.get(next.preferredSource().id());
             active = preferred;
+            preferred.event(EndpointEvent.Kind.ACTIVATED, "the previously active source was removed or changed");
             events.sourceActivated(next.id(), preferred.spec.id());
         }
         publishOutputs();
@@ -268,8 +273,13 @@ final class RunningBrew implements Brew, BrewContext {
         if (leg == null) {
             throw new IllegalArgumentException("brew " + spec.id() + " has no source " + source);
         }
-        if (active != leg) {
+        SourceLeg previous = active;
+        if (previous != leg) {
             active = leg;
+            if (previous != null) {
+                previous.event(EndpointEvent.Kind.DEACTIVATED, "replaced by " + source + " (operator)");
+            }
+            leg.event(EndpointEvent.Kind.ACTIVATED, "by operator");
             events.sourceActivated(spec.id(), source);
         }
     }
@@ -466,6 +476,11 @@ final class RunningBrew implements Brew, BrewContext {
     @Override
     public ScheduledExecutorService dialer() {
         return engine.dialer();
+    }
+
+    @Override
+    public void endpointEvent(String endpointId, EndpointEvent event) {
+        events.endpointEvent(spec.id(), endpointId, event);
     }
 
     @Override

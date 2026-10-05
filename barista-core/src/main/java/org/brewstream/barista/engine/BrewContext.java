@@ -19,6 +19,7 @@ package org.brewstream.barista.engine;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.channel.EventLoop;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.press.net.PressTransport;
 import org.brewstream.roast.socket.SrtTransport;
@@ -53,4 +54,6 @@ interface BrewContext {
     void onSourceChunk(SourceLeg source, ByteBuf chunk);
 
     void endpointStateChanged(String endpointId, EndpointState from, EndpointState to);
+
+    void endpointEvent(String endpointId, EndpointEvent event);
 }
