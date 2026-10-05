@@ -16,6 +16,7 @@
 
 package org.brewstream.barista.engine;
 
+import org.brewstream.barista.ConnectionView;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.spec.SourceSpec;
 import org.brewstream.barista.spec.SrtCallerEndpoint;
@@ -24,12 +25,14 @@ import org.brewstream.roast.socket.SrtConfig;
 import org.brewstream.roast.socket.SrtConnection;
 
 import java.net.InetSocketAddress;
+import java.util.List;
 
 /** Pulls from a remote SRT listener, redialling with backoff when it cannot connect or is dropped. */
 final class SrtCallerSource extends SourceLeg {
 
     private final SrtCallerEndpoint endpoint;
     private Redialer redialer;
+    private volatile long connectedSince;
 
     SrtCallerSource(SourceSpec spec, SrtCallerEndpoint endpoint, BrewContext context) {
         super(spec, "srt-caller", context);
@@ -44,6 +47,7 @@ final class SrtCallerSource extends SourceLeg {
                         SrtConfig.defaults().withLatency(endpoint.latency()),
                         context.srtTransport(context.brewLoop())),
                 connection -> {
+                    connectedSince = System.currentTimeMillis();
                     connection.onData(this::receive);
                     state(EndpointState.ACTIVE);
                 },
@@ -63,14 +67,9 @@ final class SrtCallerSource extends SourceLeg {
     }
 
     @Override
-    int connections() {
-        return connected() ? 1 : 0;
-    }
-
-    @Override
-    Object transportStats() {
+    List<ConnectionView> connections() {
         SrtConnection current = redialer == null ? null : redialer.connection();
-        return current == null ? null : current.stats();
+        return current == null ? List.of() : List.of(Connections.srt(current, connectedSince));
     }
 
     @Override

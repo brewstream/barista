@@ -26,6 +26,10 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import org.brewstream.barista.Brew;
+import org.brewstream.barista.ConnectionView;
+import org.brewstream.barista.RtpReceiveStats;
+import org.brewstream.barista.RtpSendStats;
+import org.brewstream.barista.SrtStats;
 import org.brewstream.barista.BrewListener;
 import org.brewstream.barista.BrewState;
 import org.brewstream.barista.EndpointState;
@@ -135,6 +139,20 @@ class BaristaIntegrationTest {
         assertThat(source.address()).isEqualTo(HOST + ":" + port);
         assertThat(source.bytes()).isEqualTo(ts.length);
         await(() -> brew.status().sources().getFirst().health() != null, "source health");
+
+        // Every leg kind reports its connection in its own transport's terms. (#4)
+        assertThat(source.connections()).singleElement().satisfies(view -> {
+            assertThat(view.streamId()).isEqualTo("publish");
+            assertThat(view.stats()).isInstanceOf(SrtStats.class);
+        });
+        List<EndpointStatus> outputs = brew.status().outputs();
+        assertThat(outputs.get(0).connections()).singleElement().satisfies(view -> {
+            assertThat(view.peer()).isEqualTo(HOST + ":" + rtp.port);
+            assertThat(view.stats()).isInstanceOfSatisfying(RtpSendStats.class,
+                    stats -> assertThat(stats.bytesSent()).isEqualTo(ts.length));
+        });
+        assertThat(outputs.get(1).connections()).singleElement()
+                .satisfies(view -> assertThat(view.stats()).isInstanceOf(SrtStats.class));
     }
 
     @Test
@@ -147,7 +165,7 @@ class BaristaIntegrationTest {
         assertThat(rtpPort).as("an RTP block base").isEqualTo(rtpFirst);
         Sink first = srtSubscriber(srtPort);
         Sink second = srtSubscriber(srtPort);
-        await(() -> brew.status().outputs().getFirst().connections() == 2, "two subscribers");
+        await(() -> brew.status().outputs().getFirst().connections().size() == 2, "two subscribers");
 
         RtpSender sender = track(RtpSender.connect(RtpSenderConfig.to(new InetSocketAddress(LOOPBACK, rtpPort))));
         byte[] ts = TsFixtures.packets(0, 7 * 60);
@@ -157,6 +175,21 @@ class BaristaIntegrationTest {
         second.await(ts.length);
         assertThat(first.bytes()).isEqualTo(ts);
         assertThat(second.bytes()).isEqualTo(ts);
+
+        // Each subscriber is its own connection, with its own statistics. (#4)
+        List<ConnectionView> subscribers = brew.status().outputs().getFirst().connections();
+        assertThat(subscribers).hasSize(2);
+        assertThat(subscribers).extracting(ConnectionView::id).doesNotHaveDuplicates();
+        assertThat(subscribers).allSatisfy(view -> {
+            assertThat(view.streamId()).isEqualTo("pull");
+            assertThat(view.peer()).startsWith(HOST + ":");
+            assertThat(view.connectedSinceMillis()).isPositive();
+            assertThat(view.stats()).isInstanceOfSatisfying(SrtStats.class,
+                    stats -> assertThat(stats.bytesSent()).isEqualTo(ts.length));
+        });
+        ConnectionView feed = brew.status().sources().getFirst().connections().getFirst();
+        assertThat(feed.stats()).isInstanceOfSatisfying(RtpReceiveStats.class,
+                stats -> assertThat(stats.bytesReceived()).isEqualTo(ts.length));
     }
 
     @Test

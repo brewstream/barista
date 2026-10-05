@@ -19,16 +19,19 @@ package org.brewstream.barista.engine;
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
+import org.brewstream.barista.ConnectionView;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.spec.RtpReceiveEndpoint;
 import org.brewstream.barista.spec.SourceSpec;
 import org.brewstream.press.net.RtpReceiver;
 import org.brewstream.press.net.RtpReceiverConfig;
+import org.brewstream.press.net.ReceiverStats;
 
 import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.UnknownHostException;
+import java.util.List;
 
 /**
  * RTP arriving on a base port, unicast or multicast, through a Press receiver:
@@ -38,6 +41,8 @@ final class RtpReceiveSource extends SourceLeg {
 
     private final RtpReceiveEndpoint endpoint;
     private RtpReceiver receiver;
+    private volatile long heardSinceMillis;
+    private volatile long heardSsrc = -1;
 
     RtpReceiveSource(SourceSpec spec, RtpReceiveEndpoint endpoint, BrewContext context) {
         super(spec, "rtp-receive", context);
@@ -78,14 +83,22 @@ final class RtpReceiveSource extends SourceLeg {
         return host + ":" + endpoint.port();
     }
 
+    /** The sender, once heard. A new SSRC (an encoder restart) starts its connected-since afresh. */
     @Override
-    int connections() {
-        return everDelivered() ? 1 : 0;
-    }
-
-    @Override
-    Object transportStats() {
-        return receiver == null ? null : receiver.stats();
+    List<ConnectionView> connections() {
+        RtpReceiver current = receiver;
+        if (current == null || !everDelivered()) {
+            return List.of();
+        }
+        ReceiverStats stats = current.stats();
+        if (stats == null || stats.ssrc() == -1) {
+            return List.of();
+        }
+        if (stats.ssrc() != heardSsrc) {
+            heardSsrc = stats.ssrc();
+            heardSinceMillis = System.currentTimeMillis();
+        }
+        return List.of(Connections.rtpReceive(stats, heardSinceMillis));
     }
 
     @Override
