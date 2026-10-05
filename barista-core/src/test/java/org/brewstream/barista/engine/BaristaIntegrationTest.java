@@ -98,8 +98,9 @@ class BaristaIntegrationTest {
     void setUp() throws IOException {
         group = new MultiThreadIoEventLoopGroup(4, NioIoHandler.newFactory());
         repository = new InMemoryBrewRepository();
-        srtFirst = freeRun(10);
-        rtpFirst = freeRun(40);
+        // One run split in two: separate probes could return overlapping ranges, which the allocator refuses.
+        srtFirst = freeRun(50);
+        rtpFirst = srtFirst + 10;
         barista = engine(BaristaSettings.defaults());
     }
 
