@@ -25,7 +25,7 @@ abstract class OutputLeg extends Leg {
 
     final OutputSpec spec;
     protected final EventLoop loop;
-    protected final LegMonitor monitor = new LegMonitor();
+    protected final LegMonitor monitor = new LegMonitor(false);
 
     OutputLeg(OutputSpec spec, String kind, BrewContext context) {
         super(spec.id().value(), kind, context, false);

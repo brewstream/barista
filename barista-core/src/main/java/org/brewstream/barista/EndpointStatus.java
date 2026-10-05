@@ -39,6 +39,11 @@ import java.util.List;
  *                       or disconnected peer); 0 for a source
  * @param discardedBytes for a source: bytes that were not part of any TS packet
  * @param tsStats        TS health on this leg from Grind, or {@code null} before any data
+ * @param carriesScte35  for a source: whether its program map declares an SCTE-35 splice PID,
+ *                       known before any marker arrives (a splice PID is silent between
+ *                       breaks). Always false for an output
+ * @param spliceMarkers  for a source: the last 20 SCTE-35 markers, oldest first, copies of
+ *                       one section counted as one. Always empty for an output
  * @param history        what happened to this leg and why, oldest first, at most the last 50
  *                       events (consecutive repeats count as one)
  * @param error          why the endpoint failed, or {@code null}
@@ -55,11 +60,14 @@ public record EndpointStatus(
         long droppedChunks,
         long discardedBytes,
         TsStreamStats tsStats,
+        boolean carriesScte35,
+        List<SpliceMarker> spliceMarkers,
         List<EndpointEvent> history,
         String error) {
 
     public EndpointStatus {
         connections = List.copyOf(connections);
+        spliceMarkers = List.copyOf(spliceMarkers);
         history = List.copyOf(history);
     }
 }

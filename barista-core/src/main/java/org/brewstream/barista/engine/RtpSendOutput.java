@@ -116,7 +116,7 @@ final class RtpSendOutput extends OutputLeg {
         String destination = endpoint.host() + ":" + endpoint.port();
         return new EndpointStatus(id, kind, destination, state(), health(),
                 current == null ? List.of() : List.of(Connections.rtpSend(current.stats(), destination, openedSince)),
-                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.tsStats(), history.snapshot(),
+                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.tsStats(), false, List.of(), history.snapshot(),
                 error);
     }
 }

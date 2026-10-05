@@ -34,7 +34,7 @@ abstract class SourceLeg extends Leg {
 
     final SourceSpec spec;
     private final TsAligner aligner;
-    private final LegMonitor monitor = new LegMonitor();
+    private final LegMonitor monitor = new LegMonitor(true);
     private volatile long lastDataNanos;
 
     SourceLeg(SourceSpec spec, String kind, BrewContext context) {
@@ -98,6 +98,7 @@ abstract class SourceLeg extends Leg {
     @Override
     EndpointStatus status() {
         return new EndpointStatus(id, kind, address(), state(), health(), connections(), monitor.chunks(), monitor.bytes(),
-                0, aligner.discardedBytes(), monitor.tsStats(), history.snapshot(), error);
+                0, aligner.discardedBytes(), monitor.tsStats(), monitor.carriesScte35(), monitor.spliceMarkers(), history.snapshot(),
+                error);
     }
 }

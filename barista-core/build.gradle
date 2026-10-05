@@ -6,6 +6,7 @@ dependencies {
     api "io.github.brewstream:roast:${roastVersion}"
     api "io.github.brewstream:press:${pressVersion}"
     api "io.github.brewstream:grind-core:${grindVersion}"
+    implementation "io.github.brewstream:grind-scte:${grindVersion}"
     implementation "io.github.brewstream:grind-netty:${grindVersion}"
 }
 

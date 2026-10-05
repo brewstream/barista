@@ -122,7 +122,7 @@ final class SrtCallerOutput extends OutputLeg {
         SrtConnection current = redialer == null ? null : redialer.connection();
         return new EndpointStatus(id, kind, endpoint.host() + ":" + endpoint.port(), state(), health(),
                 current == null ? List.of() : List.of(Connections.srt(current, connectedSince)),
-                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.tsStats(), history.snapshot(),
+                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.tsStats(), false, List.of(), history.snapshot(),
                 error);
     }
 }

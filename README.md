@@ -33,7 +33,8 @@ Brew brew = barista.create(BrewSpec.of("studio-feed",
                 OutputSpec.of("partners", SrtListenerEndpoint.any()))));     // subscribers pull here
 
 brew.status();                                   // every leg: state, a health word (GOOD, DEGRADED,
-                                                 // DOWN), traffic, TS health (Grind), and
+                                                 // DOWN), traffic, TS health (Grind), SCTE-35
+                                                 // markers on each source, and
                                                  // each connection with typed SRT or RTP stats, and
                                                  // what happened and why ("no answer from 10.0.0.9:9000")
 barista.activate(brew.id(), new SourceId("backup"));  // or let the brew switch by itself:

@@ -17,10 +17,14 @@
 package org.brewstream.barista.engine;
 
 import io.netty.buffer.ByteBuf;
+import org.brewstream.barista.SpliceMarker;
+import org.brewstream.grind.ProgramMap;
 import org.brewstream.grind.TsAnalyzer;
 import org.brewstream.grind.TsPacket;
 import org.brewstream.grind.TsStreamStats;
+import org.brewstream.grind.scte.SpliceMonitor;
 
+import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -28,6 +32,11 @@ import java.util.concurrent.TimeUnit;
  * TS packet. Written by one thread (the leg's), read by any: counters are
  * volatile, and the analyzer's statistics are published as a snapshot at most
  * once a second, so readers never touch the analyzer itself.
+ *
+ * <p>For a source it also reads SCTE-35 with Grind's {@link SpliceMonitor}. The
+ * monitor learns the splice PIDs from the program map, which is handed over only
+ * when it changes, and sees only splice and clock packets; a stream whose PMT
+ * declares no splice PID never reaches it.
  */
 final class LegMonitor {
 
@@ -38,6 +47,23 @@ final class LegMonitor {
     private volatile long bytes;
     private volatile TsStreamStats health;
     private long lastPublishNanos;
+    private final SpliceMonitor splice;
+    private final SpliceMarkers markers;
+    private ProgramMap programs = ProgramMap.EMPTY;
+    private int[] splicePids = new int[0];
+    private volatile boolean carriesScte35;
+
+    /** @param spliceMarkers whether to read SCTE-35: for a source, not an output */
+    LegMonitor(boolean spliceMarkers) {
+        if (spliceMarkers) {
+            markers = new SpliceMarkers();
+            splice = new SpliceMonitor();
+            splice.addListener(markers::add);
+        } else {
+            markers = null;
+            splice = null;
+        }
+    }
 
     /** Observes a chunk of whole TS packets. Does not take ownership. */
     void observe(ByteBuf chunk) {
@@ -45,7 +71,11 @@ final class LegMonitor {
         byte[] data = new byte[length];
         chunk.getBytes(chunk.readerIndex(), data);
         for (int offset = 0; offset + TsAligner.PACKET <= length; offset += TsAligner.PACKET) {
-            analyzer.consume(TsPacket.parse(data, offset));
+            TsPacket packet = TsPacket.parse(data, offset);
+            analyzer.consume(packet);
+            if (splice != null) {
+                watchSplices(packet);
+            }
         }
         chunks = chunks + 1;
         bytes = bytes + length;
@@ -56,12 +86,44 @@ final class LegMonitor {
         }
     }
 
+    private void watchSplices(TsPacket packet) {
+        ProgramMap current = analyzer.programs();
+        if (current != programs) {
+            programs = current;
+            splice.programs(current);
+            splicePids = splice.splicePids().stream().mapToInt(Integer::intValue).toArray();
+            carriesScte35 = splicePids.length > 0;
+        }
+        if (splicePids.length > 0 && (packet.pcr() >= 0 || isSplicePid(packet.pid()))) {
+            splice.consume(packet);
+        }
+    }
+
+    private boolean isSplicePid(int pid) {
+        for (int splicePid : splicePids) {
+            if (splicePid == pid) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     long chunks() {
         return chunks;
     }
 
     long bytes() {
         return bytes;
+    }
+
+    /** Whether the program map declares a splice PID, whether or not a marker has arrived. */
+    boolean carriesScte35() {
+        return carriesScte35;
+    }
+
+    /** The recent splice markers, oldest first; empty for an output. */
+    List<SpliceMarker> spliceMarkers() {
+        return markers == null ? List.of() : markers.snapshot();
     }
 
     /** The last published statistics, or {@code null} before any data. */
