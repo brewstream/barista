@@ -52,6 +52,11 @@ the dwell time (10 s by default) on a source, and says why in the event history 
 `onSourceActivated`. Failback is off by default: a recovered primary takes over again
 only if the policy says so, because switching back on air is a glitch.
 
+A subscriber slower than the stream drops its oldest data and keeps watching.
+On an SRT listener output, `withSlowSubscribers(SlowSubscriberPolicy.disconnect())`
+disconnects one that stays behind instead (three queues dropped, or 10 s behind,
+by default), so it can rejoin at the live edge; the reason is in the history.
+
 Ports left at 0 are allocated when the brew is created and stored with it, so a
 restart brings it back on the same ports. Every output has its own queue, so a
 slow or dead output never holds up the source or the others.

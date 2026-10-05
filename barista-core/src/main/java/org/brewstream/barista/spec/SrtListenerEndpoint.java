@@ -27,14 +27,23 @@ import java.util.Objects;
  * @param port     local port, or 0 to allocate one
  * @param streamId the stream ID callers must ask for, or {@code null} to accept any
  * @param security encryption, or {@code null} for none
- * @param latency  SRT receive latency
+ * @param latency         SRT receive latency
+ * @param slowSubscribers as an output, what to do with a subscriber that falls too far behind;
+ *                        {@code null} means {@link SlowSubscriberPolicy#dropOldest()}. Ignored on
+ *                        a source
  */
-public record SrtListenerEndpoint(int port, String streamId, SrtSecurity security, Duration latency)
-        implements SourceEndpoint, OutputEndpoint {
+public record SrtListenerEndpoint(int port, String streamId, SrtSecurity security, Duration latency,
+        SlowSubscriberPolicy slowSubscribers) implements SourceEndpoint, OutputEndpoint {
 
     public SrtListenerEndpoint {
         Ports.check(port);
         Objects.requireNonNull(latency, "latency");
+        slowSubscribers = slowSubscribers != null ? slowSubscribers : SlowSubscriberPolicy.dropOldest();
+    }
+
+    /** Keeps slow subscribers, dropping their oldest data. */
+    public SrtListenerEndpoint(int port, String streamId, SrtSecurity security, Duration latency) {
+        this(port, streamId, security, latency, SlowSubscriberPolicy.dropOldest());
     }
 
     /** Any stream ID, no encryption, 120 ms latency, on an allocated port. */
@@ -43,7 +52,11 @@ public record SrtListenerEndpoint(int port, String streamId, SrtSecurity securit
     }
 
     public SrtListenerEndpoint withPort(int port) {
-        return new SrtListenerEndpoint(port, streamId, security, latency);
+        return new SrtListenerEndpoint(port, streamId, security, latency, slowSubscribers);
+    }
+
+    public SrtListenerEndpoint withSlowSubscribers(SlowSubscriberPolicy slowSubscribers) {
+        return new SrtListenerEndpoint(port, streamId, security, latency, slowSubscribers);
     }
 
     @Override
