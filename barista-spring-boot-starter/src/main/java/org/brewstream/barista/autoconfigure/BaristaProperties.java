@@ -31,6 +31,7 @@ import java.time.Duration;
  *                          (twice the processors)
  * @param queueTime         how much input each output may hold for a slow peer
  * @param sourceLossTimeout silence after which the active source counts as lost
+ * @param health            when a leg's health word is {@code DEGRADED}
  */
 @ConfigurationProperties("barista")
 public record BaristaProperties(
@@ -38,7 +39,8 @@ public record BaristaProperties(
         @DefaultValue Ports ports,
         @DefaultValue("0") int eventLoopThreads,
         @DefaultValue("2s") Duration queueTime,
-        @DefaultValue("2s") Duration sourceLossTimeout) {
+        @DefaultValue("2s") Duration sourceLossTimeout,
+        @DefaultValue Health health) {
 
     /**
      * @param id            stable for the life of the node; stored brews are keyed by it.
@@ -57,5 +59,15 @@ public record BaristaProperties(
     public record Ports(
             @DefaultValue("9000-9099") PortRange srt,
             @DefaultValue("5000-5999") PortRange rtp) {
+    }
+
+    /**
+     * @param window              how much recent history decides the word; it is judged once per window
+     * @param degradedLossPercent transport loss over a window, as a percentage of packets, above
+     *                            which a connected leg is degraded
+     */
+    public record Health(
+            @DefaultValue("5s") Duration window,
+            @DefaultValue("1.0") double degradedLossPercent) {
     }
 }

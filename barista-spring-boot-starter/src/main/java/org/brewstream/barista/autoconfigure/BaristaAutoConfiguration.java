@@ -91,7 +91,8 @@ public class BaristaAutoConfiguration {
     public BaristaSettings baristaSettings(BaristaProperties properties) {
         BaristaSettings defaults = BaristaSettings.defaults();
         return new BaristaSettings(properties.queueTime(), defaults.minQueueBytes(), defaults.maxQueueBytes(),
-                properties.sourceLossTimeout(), defaults.reconnectMin(), defaults.reconnectMax());
+                properties.sourceLossTimeout(), defaults.reconnectMin(), defaults.reconnectMax(),
+                properties.health().window(), properties.health().degradedLossPercent());
     }
 
     @Bean

@@ -33,6 +33,7 @@ import org.brewstream.barista.SrtStats;
 import org.brewstream.barista.BrewListener;
 import org.brewstream.barista.BrewState;
 import org.brewstream.barista.EndpointEvent;
+import org.brewstream.barista.EndpointHealth;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.TsFixtures;
@@ -139,7 +140,7 @@ class BaristaIntegrationTest {
         assertThat(source.state()).isEqualTo(EndpointState.ACTIVE);
         assertThat(source.address()).isEqualTo(HOST + ":" + port);
         assertThat(source.bytes()).isEqualTo(ts.length);
-        await(() -> brew.status().sources().getFirst().health() != null, "source health");
+        await(() -> brew.status().sources().getFirst().tsStats() != null, "source health");
 
         // Every leg kind reports its connection in its own transport's terms. (#4)
         assertThat(source.connections()).singleElement().satisfies(view -> {
@@ -262,6 +263,39 @@ class BaristaIntegrationTest {
     }
 
     /**
+     * A source whose stream breaks its continuity counter is DEGRADED for the window that saw
+     * it, then GOOD again once a window passes clean. (#6)
+     */
+    @Test
+    void continuityErrorsDegradeASourceForAWindow() throws Exception {
+        barista.close();
+        barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
+                Duration.ofSeconds(2), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofMillis(1500), 1.0));
+        Brew brew = barista.create(BrewSpec.of("damaged",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())), List.of()));
+        SrtConnection publisher = srtPublish(srtPort(brew));
+        List<EndpointHealth> seen = new ArrayList<>();
+        int packet = 0;
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
+        while (System.nanoTime() < end && !(seen.contains(EndpointHealth.DEGRADED)
+                && seen.getLast() == EndpointHealth.GOOD)) {
+            if (packet == 7 * 20) {
+                packet += 3; // three packets missing: a continuity error
+            }
+            send(publisher, TsFixtures.packets(packet, 7));
+            packet += 7;
+            Thread.sleep(20);
+            EndpointHealth health = brew.status().sources().getFirst().health();
+            if (seen.isEmpty() || seen.getLast() != health) {
+                seen.add(health);
+            }
+        }
+
+        assertThat(seen).as("health over time").containsSubsequence(
+                EndpointHealth.GOOD, EndpointHealth.DEGRADED, EndpointHealth.GOOD);
+    }
+
+    /**
      * An output whose peer never answers fills only its own queue, drops from it,
      * and holds up nothing else. Queues are 128 KiB here: enough for a burst of
      * source data (Roast releases tens of packets in one pass, which a queue
@@ -272,7 +306,7 @@ class BaristaIntegrationTest {
     void aDeadOutputHoldsUpNothingElse() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 128 * 1024, 128 * 1024, Duration.ofSeconds(2),
-                Duration.ofMillis(200), Duration.ofSeconds(1)));
+                Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
         Sink live = rtpSink();
         int nobody = freeRun(1);
         Brew brew = barista.create(BrewSpec.of("one-dead",
@@ -289,6 +323,7 @@ class BaristaIntegrationTest {
         EndpointStatus dead = brew.status().outputs().getFirst();
         assertThat(dead.state()).isIn(EndpointState.CONNECTING, EndpointState.RECONNECTING);
         assertThat(dead.droppedChunks()).as("it dropped from its own queue").isPositive();
+        assertThat(dead.health()).isEqualTo(EndpointHealth.DOWN);
         assertThat(brew.status().outputs().get(1).droppedChunks()).isZero();
     }
 
@@ -296,7 +331,7 @@ class BaristaIntegrationTest {
     void reportsALostSourceAndItsReturn() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
-                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1)));
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
         List<BrewState> states = new CopyOnWriteArrayList<>();
         barista.addListener(new BrewListener() {
             @Override
@@ -468,7 +503,7 @@ class BaristaIntegrationTest {
     void recordsActivationIdlenessAndAnRtpSender() throws Exception {
         barista.close();
         barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
-                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1)));
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
         Brew brew = barista.create(BrewSpec.of("pair",
                 List.of(SourceSpec.of("main", 0, RtpReceiveEndpoint.unicast()),
                         SourceSpec.of("backup", 1, RtpReceiveEndpoint.unicast())), List.of()));

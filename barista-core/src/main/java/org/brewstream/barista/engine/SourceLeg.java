@@ -38,7 +38,7 @@ abstract class SourceLeg extends Leg {
     private volatile long lastDataNanos;
 
     SourceLeg(SourceSpec spec, String kind, BrewContext context) {
-        super(spec.id().value(), kind, context);
+        super(spec.id().value(), kind, context, true);
         this.spec = spec;
         this.aligner = new TsAligner(context.allocator());
     }
@@ -92,7 +92,7 @@ abstract class SourceLeg extends Leg {
 
     @Override
     EndpointStatus status() {
-        return new EndpointStatus(id, kind, address(), state(), connections(), monitor.chunks(), monitor.bytes(),
-                0, aligner.discardedBytes(), monitor.health(), history.snapshot(), error);
+        return new EndpointStatus(id, kind, address(), state(), health(), connections(), monitor.chunks(), monitor.bytes(),
+                0, aligner.discardedBytes(), monitor.tsStats(), history.snapshot(), error);
     }
 }

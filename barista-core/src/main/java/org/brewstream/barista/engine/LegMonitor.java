@@ -65,7 +65,7 @@ final class LegMonitor {
     }
 
     /** The last published statistics, or {@code null} before any data. */
-    TsStreamStats health() {
+    TsStreamStats tsStats() {
         return health;
     }
 }

@@ -32,7 +32,8 @@ Brew brew = barista.create(BrewSpec.of("studio-feed",
         List.of(OutputSpec.of("playout", RtpSendEndpoint.to("10.0.0.9", 5000).withFec(5, 5)),
                 OutputSpec.of("partners", SrtListenerEndpoint.any()))));     // subscribers pull here
 
-brew.status();                                   // every leg: state, traffic, TS health (Grind), and
+brew.status();                                   // every leg: state, a health word (GOOD, DEGRADED,
+                                                 // DOWN), traffic, TS health (Grind), and
                                                  // each connection with typed SRT or RTP stats, and
                                                  // what happened and why ("no answer from 10.0.0.9:9000")
 barista.activate(brew.id(), new SourceId("backup"));
@@ -58,4 +59,13 @@ barista:
   ports:
     srt: 9000-9099
     rtp: 5000-5999              # blocks of five (P..P+4), ten apart
+  health:
+    window: 5s                  # judged once per window
+    degraded-loss-percent: 1.0  # transport loss above this is DEGRADED
 ```
+
+Every source and output carries one health word, decided in one place so every
+UI and alert agrees. `DOWN`: not connected, or a source not delivering.
+`DEGRADED`: connected, but over the last window transport loss passed the
+threshold, the TS on that leg had continuity errors, or an output dropped
+chunks from its queue. `GOOD`: otherwise.

@@ -30,23 +30,39 @@ import java.util.Objects;
  *                          {@code SOURCE_LOST}, and any source before it is {@code IDLE}
  * @param reconnectMin      first wait before a caller dials again
  * @param reconnectMax      longest wait between dials; the wait doubles up to this
+ * @param healthWindow      how much recent history decides whether a leg is {@code DEGRADED};
+ *                          the word is judged once per window, so it can lag by up to one
+ * @param degradedLossPercent transport loss, as a percentage of packets over a window, above
+ *                          which a connected leg is {@code DEGRADED}. See {@link org.brewstream.barista.EndpointHealth}
+ *                          for the whole rule
  */
 public record BaristaSettings(Duration queueTime, long minQueueBytes, long maxQueueBytes,
-        Duration sourceLossTimeout, Duration reconnectMin, Duration reconnectMax) {
+        Duration sourceLossTimeout, Duration reconnectMin, Duration reconnectMax,
+        Duration healthWindow, double degradedLossPercent) {
 
     public BaristaSettings {
         Objects.requireNonNull(queueTime, "queueTime");
         Objects.requireNonNull(sourceLossTimeout, "sourceLossTimeout");
         Objects.requireNonNull(reconnectMin, "reconnectMin");
         Objects.requireNonNull(reconnectMax, "reconnectMax");
+        Objects.requireNonNull(healthWindow, "healthWindow");
+        if (healthWindow.isNegative() || healthWindow.isZero()) {
+            throw new IllegalArgumentException("healthWindow must be positive");
+        }
+        if (!(degradedLossPercent >= 0 && degradedLossPercent <= 100)) {
+            throw new IllegalArgumentException("degradedLossPercent must be 0 to 100");
+        }
         if (minQueueBytes <= 0 || maxQueueBytes < minQueueBytes) {
             throw new IllegalArgumentException("need 0 < minQueueBytes <= maxQueueBytes");
         }
     }
 
-    /** 2 s of queue per output (256 KiB to 16 MiB), 2 s source loss, reconnect 0.5 s doubling to 10 s. */
+    /**
+     * 2 s of queue per output (256 KiB to 16 MiB), 2 s source loss, reconnect 0.5 s doubling to
+     * 10 s, health judged over 5 s windows with more than 1% transport loss counting as degraded.
+     */
     public static BaristaSettings defaults() {
         return new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024, Duration.ofSeconds(2),
-                Duration.ofMillis(500), Duration.ofSeconds(10));
+                Duration.ofMillis(500), Duration.ofSeconds(10), Duration.ofSeconds(5), 1.0);
     }
 }

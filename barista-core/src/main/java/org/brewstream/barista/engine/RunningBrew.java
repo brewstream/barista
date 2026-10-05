@@ -24,6 +24,7 @@ import org.brewstream.barista.Brew;
 import org.brewstream.barista.BrewState;
 import org.brewstream.barista.BrewStatus;
 import org.brewstream.barista.EndpointEvent;
+import org.brewstream.barista.EndpointHealth;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.spec.BrewId;
@@ -97,6 +98,7 @@ final class RunningBrew implements Brew, BrewContext {
     // Owned by the brew loop.
     private long windowBytes;
     private long windowStartNanos;
+    private long healthSampleNanos;
     private volatile long inputBitsPerSecond;
 
     /** What a brew needs from the engine that runs it. */
@@ -162,7 +164,8 @@ final class RunningBrew implements Brew, BrewContext {
     }
 
     private static EndpointStatus idle(String id) {
-        return new EndpointStatus(id, null, null, EndpointState.STOPPED, List.of(), 0, 0, 0, 0, null, List.of(), null);
+        return new EndpointStatus(id, null, null, EndpointState.STOPPED, EndpointHealth.DOWN, List.of(), 0, 0, 0, 0, null,
+                List.of(), null);
     }
 
 
@@ -399,6 +402,15 @@ final class RunningBrew implements Brew, BrewContext {
                 } else if (current.everDelivered() || now - startedNanos >= loss) {
                     state(BrewState.SOURCE_LOST);
                 }
+            }
+            if (healthSampleNanos == 0 || now - healthSampleNanos >= engine.settings().healthWindow().toNanos()) {
+                for (SourceLeg source : sourceSnapshot) {
+                    source.sampleHealth();
+                }
+                for (OutputLeg output : outputSnapshot) {
+                    output.sampleHealth();
+                }
+                healthSampleNanos = now;
             }
             if (windowStartNanos == 0) {
                 windowStartNanos = now;
