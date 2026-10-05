@@ -28,6 +28,7 @@ import java.util.List;
  * @param address        for a listening endpoint, where callers dial it (published host and
  *                       port); otherwise the remote address it dials or sends to
  * @param state          see {@link EndpointState}
+ * @param health         {@code GOOD}, {@code DEGRADED} or {@code DOWN}; see {@link EndpointHealth}
  * @param connections    every connection on this leg, each with its own statistics: the
  *                       publisher of an SRT listener source, each subscriber of an SRT listener
  *                       output, the peer of a caller, the RTP sender or receiver. Empty when
@@ -37,7 +38,7 @@ import java.util.List;
  * @param droppedChunks  for an output: chunks discarded because its queue was full (a slow
  *                       or disconnected peer); 0 for a source
  * @param discardedBytes for a source: bytes that were not part of any TS packet
- * @param health         TS health on this leg from Grind, or {@code null} before any data
+ * @param tsStats        TS health on this leg from Grind, or {@code null} before any data
  * @param history        what happened to this leg and why, oldest first, at most the last 50
  *                       events (consecutive repeats count as one)
  * @param error          why the endpoint failed, or {@code null}
@@ -47,12 +48,13 @@ public record EndpointStatus(
         String kind,
         String address,
         EndpointState state,
+        EndpointHealth health,
         List<ConnectionView> connections,
         long chunks,
         long bytes,
         long droppedChunks,
         long discardedBytes,
-        TsStreamStats health,
+        TsStreamStats tsStats,
         List<EndpointEvent> history,
         String error) {
 

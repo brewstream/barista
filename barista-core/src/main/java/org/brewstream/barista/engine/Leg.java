@@ -17,6 +17,7 @@
 package org.brewstream.barista.engine;
 
 import org.brewstream.barista.EndpointEvent;
+import org.brewstream.barista.EndpointHealth;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 
@@ -29,11 +30,13 @@ abstract class Leg {
     private volatile EndpointState state = EndpointState.STARTING;
     protected volatile String error;
     protected final EventHistory history = new EventHistory();
+    private final HealthRule health;
 
-    Leg(String id, String kind, BrewContext context) {
+    Leg(String id, String kind, BrewContext context, boolean source) {
         this.id = id;
         this.kind = kind;
         this.context = context;
+        this.health = new HealthRule(source);
     }
 
     /** Binds and connects. Runs on the management thread and may wait. */
@@ -46,6 +49,16 @@ abstract class Leg {
 
     EndpointState state() {
         return state;
+    }
+
+    /** The health word for the status. Safe from any thread. */
+    final EndpointHealth health() {
+        return health.classify(state);
+    }
+
+    /** Judges the window just ended. Call on the brew loop, once per health window. */
+    final void sampleHealth() {
+        health.sample(status(), context.settings().degradedLossPercent());
     }
 
     final void state(EndpointState next) {
