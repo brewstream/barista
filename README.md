@@ -86,3 +86,92 @@ UI and alert agrees. `DOWN`: not connected, or a source not delivering.
 `DEGRADED`: connected, but over the last window transport loss passed the
 threshold, the TS on that leg had continuity errors, or an output dropped
 chunks from its queue. `GOOD`: otherwise.
+
+### Brews from your own configuration
+
+Barista does not read brews from `application.yml`. If it did, a brew would have
+two sources of truth, the configuration and the changes made at runtime through
+`Barista.update`, and every restart would need a rule for which one wins. Your
+application owns that rule, and creating brews at startup takes a few lines:
+bind your own properties, map them to `BrewSpec`s, and create them once the
+application is ready.
+
+```yaml
+relay:
+  brews:
+    - id: studio-feed           # a BrewId: up to 64 letters, digits, '.', '_', '-'
+      name: Studio feed
+      srt-port: 9000            # the encoder publishes here
+      outputs:
+        - { id: playout, host: 10.0.0.9, port: 5000 }
+```
+
+```java
+@ConfigurationProperties("relay")
+public record RelayProperties(List<ConfiguredBrew> brews) {
+
+    public record ConfiguredBrew(String id, String name, int srtPort, List<Destination> outputs) {
+        public BrewSpec toSpec() {
+            List<OutputSpec> rtp = outputs.stream()
+                    .map(out -> OutputSpec.of(out.id(), RtpSendEndpoint.to(out.host(), out.port())))
+                    .toList();
+            return new BrewSpec(new BrewId(id), name,
+                    List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any().withPort(srtPort))), rtp, true);
+        }
+    }
+
+    public record Destination(String id, String host, int port) {
+    }
+}
+
+@Component
+public class ConfiguredBrews {
+
+    private static final Logger LOG = Logger.getLogger(ConfiguredBrews.class.getName());
+    private final Barista barista;
+    private final RelayProperties relay;
+
+    public ConfiguredBrews(Barista barista, RelayProperties relay) {
+        this.barista = barista;
+        this.relay = relay;
+    }
+
+    @EventListener(ApplicationReadyEvent.class)
+    public void createConfiguredBrews() {
+        for (RelayProperties.ConfiguredBrew configured : relay.brews()) {
+            try {
+                if (barista.brew(new BrewId(configured.id())).isPresent()) {
+                    LOG.info("brew " + configured.id() + " restored from the repository; configuration not applied");
+                    continue;
+                }
+                barista.create(configured.toSpec());
+            } catch (RuntimeException e) {
+                LOG.log(Level.WARNING, "brew " + configured.id() + " not created: " + e.getMessage(), e);
+            }
+        }
+    }
+}
+```
+
+Enable the properties with `@EnableConfigurationProperties(RelayProperties.class)`
+or `@ConfigurationPropertiesScan`. The same code, with guards for omitted lists,
+is compiled and tested in the starter's tests (`org.brewstream.barista.example`).
+
+**Failures do not stop the application.** A brew whose port is taken, or whose
+spec is invalid, is logged and skipped, and the other brews are created. Stopping
+the whole relay because one feed is misconfigured would take every other feed
+off air.
+
+**With a persistent `BrewRepository`, match by id.** The starter restores the
+node's stored brews when the context starts, which is before
+`ApplicationReadyEvent`. So by the time this runs, a configured brew may already
+exist, restored with whatever was changed at runtime. Brews are matched by
+`BrewId`, and the example leaves a restored brew alone: runtime changes win, and
+the configuration only seeds brews that do not exist yet. If you want the
+configuration to win instead, call `barista.update(configured.toSpec())` for a
+brew that already exists. The stored ports are kept for listening endpoints left
+at port 0. Either way, removing a brew from the configuration does not delete it.
+Call `barista.delete` for brews that are stored but no longer configured, if
+that is the rule you want. With the default in-memory repository nothing is
+restored, so every configured brew is simply created.
+
