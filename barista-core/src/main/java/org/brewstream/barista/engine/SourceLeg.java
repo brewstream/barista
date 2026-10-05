@@ -18,6 +18,7 @@ package org.brewstream.barista.engine;
 
 import io.netty.buffer.ByteBuf;
 import org.brewstream.barista.ConnectionView;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.spec.SourceSpec;
@@ -65,7 +66,14 @@ abstract class SourceLeg extends Leg {
         if (!connected()) {
             return;
         }
-        state(fresh(nowNanos, lossNanos) ? EndpointState.ACTIVE : EndpointState.IDLE);
+        EndpointState previous = state();
+        EndpointState next = fresh(nowNanos, lossNanos) ? EndpointState.ACTIVE : EndpointState.IDLE;
+        if (previous == EndpointState.ACTIVE && next == EndpointState.IDLE) {
+            event(EndpointEvent.Kind.IDLE, "no data for " + lossNanos / 1_000_000 + " ms");
+        } else if (previous == EndpointState.IDLE && next == EndpointState.ACTIVE) {
+            event(EndpointEvent.Kind.RESUMED, "data flowing again");
+        }
+        state(next);
     }
 
     boolean fresh(long nowNanos, long lossNanos) {
@@ -85,6 +93,6 @@ abstract class SourceLeg extends Leg {
     @Override
     EndpointStatus status() {
         return new EndpointStatus(id, kind, address(), state(), connections(), monitor.chunks(), monitor.bytes(),
-                0, aligner.discardedBytes(), monitor.health(), error);
+                0, aligner.discardedBytes(), monitor.health(), history.snapshot(), error);
     }
 }

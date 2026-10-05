@@ -17,6 +17,7 @@
 package org.brewstream.barista.engine;
 
 import io.netty.buffer.ByteBuf;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.spec.OutputSpec;
@@ -72,10 +73,22 @@ final class SrtCallerOutput extends OutputLeg {
                     connectedSince = System.currentTimeMillis();
                     lane.queue().clear();
                     connection.pipeline().addLast(SrtSupport.writability(lane));
+                    event(EndpointEvent.Kind.CONNECTED, "connected to " + target());
                     state(EndpointState.ACTIVE);
                     lane.schedule();
                 },
-                () -> state(EndpointState.RECONNECTING));
+                () -> {
+                    event(EndpointEvent.Kind.DISCONNECTED, "connection to " + target() + " ended (cause unknown)");
+                    state(EndpointState.RECONNECTING);
+                },
+                failure -> event(EndpointEvent.Kind.FAILED, Reasons.dialFailed(failure, target())));
+        // While disconnected the queue drops by design; only a connected peer too slow is news.
+        lane.queue().onDrop(() -> {
+            if (redialer.connection() != null) {
+                event(EndpointEvent.Kind.DROPPING, target() + " is slower than the stream: dropping oldest");
+            }
+        });
+        event(EndpointEvent.Kind.STARTED, "dialling " + target());
         state(EndpointState.CONNECTING);
         redialer.start();
     }
@@ -96,7 +109,12 @@ final class SrtCallerOutput extends OutputLeg {
             redialer.close();
         }
         lane.queue().clear();
+        event(EndpointEvent.Kind.STOPPED, "closed");
         state(EndpointState.STOPPED);
+    }
+
+    private String target() {
+        return endpoint.host() + ":" + endpoint.port();
     }
 
     @Override
@@ -104,6 +122,7 @@ final class SrtCallerOutput extends OutputLeg {
         SrtConnection current = redialer == null ? null : redialer.connection();
         return new EndpointStatus(id, kind, endpoint.host() + ":" + endpoint.port(), state(),
                 current == null ? List.of() : List.of(Connections.srt(current, connectedSince)),
-                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.health(), error);
+                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.health(), history.snapshot(),
+                error);
     }
 }

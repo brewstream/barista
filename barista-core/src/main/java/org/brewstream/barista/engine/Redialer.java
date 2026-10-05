@@ -36,6 +36,7 @@ final class Redialer {
     private final Supplier<CompletableFuture<SrtConnection>> dial;
     private final Consumer<SrtConnection> onConnected;
     private final Runnable onDisconnected;
+    private final Consumer<Throwable> onFailed;
     private final long minNanos;
     private final long maxNanos;
     private long waitNanos;
@@ -44,11 +45,12 @@ final class Redialer {
     private ScheduledFuture<?> pending;
 
     Redialer(BrewContext context, Supplier<CompletableFuture<SrtConnection>> dial,
-            Consumer<SrtConnection> onConnected, Runnable onDisconnected) {
+            Consumer<SrtConnection> onConnected, Runnable onDisconnected, Consumer<Throwable> onFailed) {
         this.context = context;
         this.dial = dial;
         this.onConnected = onConnected;
         this.onDisconnected = onDisconnected;
+        this.onFailed = onFailed;
         this.minNanos = context.settings().reconnectMin().toNanos();
         this.maxNanos = context.settings().reconnectMax().toNanos();
         this.waitNanos = minNanos;
@@ -83,11 +85,15 @@ final class Redialer {
         try {
             attempt = dial.get();
         } catch (RuntimeException e) {
+            onFailed.accept(e);
             retryLater();
             return;
         }
         attempt.whenComplete((opened, failure) -> {
             if (failure != null) {
+                if (!closed) {
+                    onFailed.accept(failure);
+                }
                 retryLater();
                 return;
             }

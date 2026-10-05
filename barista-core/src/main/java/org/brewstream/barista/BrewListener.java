@@ -36,4 +36,12 @@ public interface BrewListener {
 
     default void onSourceActivated(BrewId brew, SourceId source) {
     }
+
+    /**
+     * Something happened to a source or output, with the reason in plain words.
+     * The same events make up {@link EndpointStatus#history()}; a repeat of the
+     * previous event is reported again here, with its count.
+     */
+    default void onEndpointEvent(BrewId brew, String endpointId, EndpointEvent event) {
+    }
 }

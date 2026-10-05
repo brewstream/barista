@@ -17,6 +17,7 @@
 package org.brewstream.barista.engine;
 
 import io.netty.buffer.ByteBuf;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.spec.OutputSpec;
@@ -76,6 +77,11 @@ final class RtpSendOutput extends OutputLeg {
         }
         sender = RtpSender.connect(config, context.pressTransport(loop));
         openedSince = System.currentTimeMillis();
+        String destination = endpoint.host() + ":" + endpoint.port();
+        lane.queue().onDrop(() -> event(EndpointEvent.Kind.DROPPING,
+                "sending to " + destination + " cannot keep up: dropping oldest"));
+        event(EndpointEvent.Kind.STARTED, "sending to " + destination
+                + (endpoint.fecColumns() > 0 ? " with FEC " + endpoint.fecColumns() + "x" + endpoint.fecRows() : ""));
         state(EndpointState.ACTIVE);
     }
 
@@ -100,6 +106,7 @@ final class RtpSendOutput extends OutputLeg {
             }
         }
         lane.queue().clear();
+        event(EndpointEvent.Kind.STOPPED, "closed");
         state(EndpointState.STOPPED);
     }
 
@@ -109,6 +116,7 @@ final class RtpSendOutput extends OutputLeg {
         String destination = endpoint.host() + ":" + endpoint.port();
         return new EndpointStatus(id, kind, destination, state(),
                 current == null ? List.of() : List.of(Connections.rtpSend(current.stats(), destination, openedSince)),
-                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.health(), error);
+                monitor.chunks(), monitor.bytes(), lane.queue().dropped(), 0, monitor.health(), history.snapshot(),
+                error);
     }
 }

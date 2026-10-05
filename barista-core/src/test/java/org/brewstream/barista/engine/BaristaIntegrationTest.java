@@ -32,6 +32,7 @@ import org.brewstream.barista.RtpSendStats;
 import org.brewstream.barista.SrtStats;
 import org.brewstream.barista.BrewListener;
 import org.brewstream.barista.BrewState;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.TsFixtures;
@@ -393,6 +394,109 @@ class BaristaIntegrationTest {
             sink.receive(datagram);
             assertThat(datagram.getLength()).isEqualTo(12 + 3 * 188);
         }
+    }
+
+    // --- event history (#5) ------------------------------------------------------
+
+    @Test
+    void recordsAPublisherArrivingAndLeavingAndRefusesASecond() throws Exception {
+        List<EndpointEvent> heard = new CopyOnWriteArrayList<>();
+        barista.addListener(new BrewListener() {
+            @Override
+            public void onEndpointEvent(BrewId brew, String endpointId, EndpointEvent event) {
+                heard.add(event);
+            }
+        });
+        Brew brew = barista.create(BrewSpec.of("history",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())), List.of()));
+        SrtConnection first = srtPublish(srtPort(brew));
+
+        assertThat(SrtCaller.connect(new InetSocketAddress(LOOPBACK, srtPort(brew)), "second")
+                .handle((connection, failure) -> failure).get(10, TimeUnit.SECONDS)).isNotNull();
+        first.close();
+        await(() -> kinds(brew).contains(EndpointEvent.Kind.DISCONNECTED), "disconnect recorded");
+
+        List<EndpointEvent> history = brew.status().sources().getFirst().history();
+        assertThat(history).extracting(EndpointEvent::kind).containsSubsequence(
+                EndpointEvent.Kind.STARTED, EndpointEvent.Kind.ACTIVATED, EndpointEvent.Kind.CONNECTED,
+                EndpointEvent.Kind.REJECTED, EndpointEvent.Kind.DISCONNECTED);
+        assertThat(reason(history, EndpointEvent.Kind.CONNECTED)).startsWith("publisher " + HOST + ":")
+                .endsWith("(stream 'publish')");
+        assertThat(reason(history, EndpointEvent.Kind.REJECTED)).contains("another publisher is already connected");
+        assertThat(reason(history, EndpointEvent.Kind.DISCONNECTED)).endsWith("(cause unknown)");
+        await(() -> heard.stream().anyMatch(e -> e.kind() == EndpointEvent.Kind.REJECTED), "listener told");
+    }
+
+    @Test
+    void recordsACallerRefusedForAnUnknownStreamId() throws Exception {
+        Brew brew = barista.create(BrewSpec.of("named",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())),
+                List.of(OutputSpec.of("studio", new SrtListenerEndpoint(0, "studio", null, Duration.ofMillis(120))))));
+        int port = ((SrtListenerEndpoint) brew.spec().outputs().getFirst().endpoint()).port();
+
+        SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), "wrong").handle((c, f) -> f).get(10, TimeUnit.SECONDS);
+
+        await(() -> brew.status().outputs().getFirst().history().stream()
+                .anyMatch(e -> e.kind() == EndpointEvent.Kind.REJECTED), "refusal recorded");
+        assertThat(reason(brew.status().outputs().getFirst().history(), EndpointEvent.Kind.REJECTED))
+                .contains("unknown stream ID 'wrong'");
+    }
+
+    @Test
+    void explainsWhyACallerCannotConnect() throws Exception {
+        SrtListener remote = SrtListener.bind(new InetSocketAddress(LOOPBACK, 0));
+        resources.add(remote::close);
+        remote.setAcceptHandler(request -> AcceptDecision.accept("the-right-passphrase".toCharArray(), 16));
+        int nobody = freeRun(1);
+        Brew brew = barista.create(BrewSpec.of("failing",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())),
+                List.of(OutputSpec.of("wrong-secret", new SrtCallerEndpoint(HOST, remote.localAddress().getPort(),
+                                null, new org.brewstream.barista.spec.SrtSecurity("a-wrong-passphrase", 16),
+                                Duration.ofMillis(120))),
+                        OutputSpec.of("nobody", SrtCallerEndpoint.to(HOST, nobody)))));
+
+        await(() -> kindsOf(brew.status().outputs().get(0)).contains(EndpointEvent.Kind.FAILED), "passphrase failure");
+        await(() -> kindsOf(brew.status().outputs().get(1)).contains(EndpointEvent.Kind.FAILED), "timeout failure");
+
+        assertThat(reason(brew.status().outputs().get(0).history(), EndpointEvent.Kind.FAILED))
+                .containsAnyOf("wrong passphrase", "passphrase mismatch");
+        assertThat(reason(brew.status().outputs().get(1).history(), EndpointEvent.Kind.FAILED))
+                .isEqualTo("no answer from " + HOST + ":" + nobody);
+    }
+
+    @Test
+    void recordsActivationIdlenessAndAnRtpSender() throws Exception {
+        barista.close();
+        barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1)));
+        Brew brew = barista.create(BrewSpec.of("pair",
+                List.of(SourceSpec.of("main", 0, RtpReceiveEndpoint.unicast()),
+                        SourceSpec.of("backup", 1, RtpReceiveEndpoint.unicast())), List.of()));
+        RtpSender main = track(RtpSender.connect(RtpSenderConfig.to(rtpAddress(brew, 0))));
+
+        send(main, TsFixtures.packets(0, 14));
+        await(() -> kindsOf(brew.status().sources().get(0)).contains(EndpointEvent.Kind.IDLE), "idle recorded");
+        send(main, TsFixtures.packets(14, 14));
+        await(() -> kindsOf(brew.status().sources().get(0)).contains(EndpointEvent.Kind.RESUMED), "resume recorded");
+        barista.activate(brew.id(), new SourceId("backup"));
+
+        List<EndpointEvent> mainHistory = brew.status().sources().get(0).history();
+        assertThat(reason(mainHistory, EndpointEvent.Kind.CONNECTED)).startsWith("sender " + HOST + ":").endsWith("heard");
+        assertThat(reason(mainHistory, EndpointEvent.Kind.IDLE)).isEqualTo("no data for 400 ms");
+        assertThat(reason(mainHistory, EndpointEvent.Kind.DEACTIVATED)).isEqualTo("replaced by backup (operator)");
+        assertThat(reason(brew.status().sources().get(1).history(), EndpointEvent.Kind.ACTIVATED)).isEqualTo("by operator");
+    }
+
+    private static List<EndpointEvent.Kind> kinds(Brew brew) {
+        return kindsOf(brew.status().sources().getFirst());
+    }
+
+    private static List<EndpointEvent.Kind> kindsOf(EndpointStatus endpoint) {
+        return endpoint.history().stream().map(EndpointEvent::kind).toList();
+    }
+
+    private static String reason(List<EndpointEvent> history, EndpointEvent.Kind kind) {
+        return history.stream().filter(e -> e.kind() == kind).reduce((a, b) -> b).orElseThrow().reason();
     }
 
     @Test

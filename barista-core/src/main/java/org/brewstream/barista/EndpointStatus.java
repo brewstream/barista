@@ -38,6 +38,8 @@ import java.util.List;
  *                       or disconnected peer); 0 for a source
  * @param discardedBytes for a source: bytes that were not part of any TS packet
  * @param health         TS health on this leg from Grind, or {@code null} before any data
+ * @param history        what happened to this leg and why, oldest first, at most the last 50
+ *                       events (consecutive repeats count as one)
  * @param error          why the endpoint failed, or {@code null}
  */
 public record EndpointStatus(
@@ -51,9 +53,11 @@ public record EndpointStatus(
         long droppedChunks,
         long discardedBytes,
         TsStreamStats health,
+        List<EndpointEvent> history,
         String error) {
 
     public EndpointStatus {
         connections = List.copyOf(connections);
+        history = List.copyOf(history);
     }
 }

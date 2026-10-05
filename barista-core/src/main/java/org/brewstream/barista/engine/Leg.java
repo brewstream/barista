@@ -16,6 +16,7 @@
 
 package org.brewstream.barista.engine;
 
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.EndpointStatus;
 
@@ -27,6 +28,7 @@ abstract class Leg {
     protected final BrewContext context;
     private volatile EndpointState state = EndpointState.STARTING;
     protected volatile String error;
+    protected final EventHistory history = new EventHistory();
 
     Leg(String id, String kind, BrewContext context) {
         this.id = id;
@@ -56,6 +58,12 @@ abstract class Leg {
 
     final void fail(Throwable cause) {
         error = cause.getMessage() != null ? cause.getMessage() : cause.toString();
+        event(EndpointEvent.Kind.FAILED, Reasons.openFailed(cause));
         state(EndpointState.FAILED);
+    }
+
+    /** Records what happened and why, and tells listeners. Safe from any thread. */
+    final void event(EndpointEvent.Kind kind, String reason) {
+        context.endpointEvent(id, history.add(kind, reason));
     }
 }

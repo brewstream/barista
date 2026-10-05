@@ -76,6 +76,17 @@ final class SrtSupport {
                 : AcceptDecision.accept(security.passphrase().toCharArray(), security.keyLength());
     }
 
+    static String hostPort(java.net.InetSocketAddress address) {
+        return address == null ? "?" : address.getAddress().getHostAddress() + ":" + address.getPort();
+    }
+
+    /** A connection as an operator would name it: its peer and the stream ID it asked for. */
+    static String describe(SrtConnection connection) {
+        String streamId = connection.metadata().streamId();
+        return hostPort(connection.metadata().peerAddress())
+                + (streamId == null || streamId.isEmpty() ? "" : " (stream '" + streamId + "')");
+    }
+
     static char[] passphrase(SrtSecurity security) {
         return security == null ? null : security.passphrase().toCharArray();
     }

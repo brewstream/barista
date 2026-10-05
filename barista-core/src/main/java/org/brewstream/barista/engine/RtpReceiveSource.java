@@ -20,14 +20,17 @@ import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import org.brewstream.barista.ConnectionView;
+import org.brewstream.barista.EndpointEvent;
 import org.brewstream.barista.EndpointState;
 import org.brewstream.barista.spec.RtpReceiveEndpoint;
 import org.brewstream.barista.spec.SourceSpec;
 import org.brewstream.press.net.RtpReceiver;
 import org.brewstream.press.net.RtpReceiverConfig;
+import org.brewstream.press.net.RtpReceiverListener;
 import org.brewstream.press.net.ReceiverStats;
 
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.net.UnknownHostException;
@@ -68,6 +71,25 @@ final class RtpReceiveSource extends SourceLeg {
                         receive(payload);
                     }
                 }));
+        receiver.addListener(new RtpReceiverListener() {
+            @Override
+            public void onSourceChanged(RtpReceiver r, long previous, long ssrc, InetSocketAddress source) {
+                String sender = (source == null ? "?" : SrtSupport.hostPort(source)) + " (SSRC " + Long.toHexString(ssrc) + ")";
+                if (previous == -1) {
+                    event(EndpointEvent.Kind.CONNECTED, "sender " + sender + " heard");
+                } else if (previous == ssrc) {
+                    event(EndpointEvent.Kind.SENDER_CHANGED, "sender " + sender + " restarted its sequence numbers");
+                } else {
+                    event(EndpointEvent.Kind.SENDER_CHANGED, "new sender " + sender + ", was SSRC " + Long.toHexString(previous));
+                }
+            }
+
+            @Override
+            public void onGoodbye(RtpReceiver r, long ssrc) {
+                event(EndpointEvent.Kind.GOODBYE, "sender SSRC " + Long.toHexString(ssrc) + " said it stopped (RTCP BYE)");
+            }
+        });
+        event(EndpointEvent.Kind.STARTED, "receiving on " + address() + (endpoint.fec() ? " with FEC" : ""));
         state(EndpointState.WAITING);
     }
 
@@ -111,6 +133,7 @@ final class RtpReceiveSource extends SourceLeg {
             Thread.currentThread().interrupt();
         }
         releaseAligner();
+        event(EndpointEvent.Kind.STOPPED, "closed");
         state(EndpointState.STOPPED);
     }
 }
