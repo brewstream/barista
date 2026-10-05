@@ -63,6 +63,42 @@ class BrewSpecTest {
     }
 
     @Test
+    void endpointsMayShareAnSrtPortWithTheirOwnStreamIds() {
+        BrewSpec spec = BrewSpec.of("shared",
+                List.of(SourceSpec.of("in", 0, listener(9000, "in"))),
+                List.of(OutputSpec.of("a", listener(9000, "out-a")), OutputSpec.of("b", listener(9000, "out-b")),
+                        OutputSpec.of("own", listener(9001, null)), OutputSpec.of("any", SrtListenerEndpoint.any())));
+
+        assertThat(spec.sharedSrtPorts()).containsExactly(9000);
+        SrtSecurity secret = new SrtSecurity("long-enough-secret", 16);
+        assertThat(listener(9000, "in").withSecurity(secret).withSlowSubscribers(SlowSubscriberPolicy.disconnect()))
+                .isEqualTo(new SrtListenerEndpoint(9000, "in", secret, java.time.Duration.ofMillis(120),
+                        SlowSubscriberPolicy.disconnect()));
+    }
+
+    @Test
+    void refusesASharedPortWithoutDistinctStreamIds() {
+        assertThatThrownBy(() -> BrewSpec.of("no-id", List.of(SourceSpec.of("in", 0, listener(9000, "in"))),
+                List.of(OutputSpec.of("out", listener(9000, null)))))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("each needs its own stream ID");
+        assertThatThrownBy(() -> BrewSpec.of("twice", List.of(SourceSpec.of("in", 0, listener(9000, "x"))),
+                List.of(OutputSpec.of("out", listener(9000, "x")))))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("stream ID 'x' is used twice");
+    }
+
+    @Test
+    void refusesASharedPortWithDifferentLatencies() {
+        SrtListenerEndpoint slow = new SrtListenerEndpoint(9000, "out", null, java.time.Duration.ofMillis(500));
+        assertThatThrownBy(() -> BrewSpec.of("latency", List.of(SourceSpec.of("in", 0, listener(9000, "in"))),
+                List.of(OutputSpec.of("out", slow))))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("same latency");
+    }
+
+    private static SrtListenerEndpoint listener(int port, String streamId) {
+        return SrtListenerEndpoint.any().withPort(port).withStreamId(streamId);
+    }
+
+    @Test
     void validatesEndpoints() {
         assertThatThrownBy(() -> new SrtSecurity("short", 16)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new SrtSecurity("long-enough-secret", 20)).isInstanceOf(IllegalArgumentException.class);

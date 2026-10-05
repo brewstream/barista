@@ -23,6 +23,7 @@ import org.brewstream.barista.spec.SourceSpec;
 import org.brewstream.barista.spec.SrtListenerEndpoint;
 import org.brewstream.roast.packet.cif.RejectionReason;
 import org.brewstream.roast.socket.AcceptDecision;
+import org.brewstream.roast.socket.ConnectionRequest;
 import org.brewstream.roast.socket.SrtConfig;
 import org.brewstream.roast.socket.SrtConnection;
 import org.brewstream.roast.socket.SrtListener;
@@ -39,6 +40,8 @@ final class SrtListenerSource extends SourceLeg {
 
     private final SrtListenerEndpoint endpoint;
     private SrtListener listener;
+    private SharedSrtPort shared;
+    private SharedSrtPort.Route route;
     private volatile SrtConnection publisher;
     private volatile long publisherSince;
 
@@ -49,36 +52,49 @@ final class SrtListenerSource extends SourceLeg {
 
     @Override
     void open() throws InterruptedException {
-        listener = SrtListener.bind(new InetSocketAddress(endpoint.port()),
-                SrtConfig.defaults().withLatency(endpoint.latency()), context.srtTransport(context.brewLoop()));
-        listener.setAcceptHandler(request -> {
-            AcceptDecision decision = publisher != null
-                    ? AcceptDecision.reject(RejectionReason.CONFLICT)
-                    : SrtSupport.admit(request, endpoint.streamId(), endpoint.security());
-            if (decision instanceof AcceptDecision.Reject rejected) {
-                event(EndpointEvent.Kind.REJECTED, Reasons.refused(rejected.reason(),
-                        SrtSupport.hostPort(request.peerAddress()), request.streamId()));
-            }
-            return decision;
-        });
-        // On the brew loop, before the caller's first packet.
-        listener.onConnection(connection -> {
-            publisherSince = System.currentTimeMillis();
-            publisher = connection;
-            String who = SrtSupport.describe(connection);
-            event(EndpointEvent.Kind.CONNECTED, "publisher " + who);
-            connection.onData(this::receive);
-            connection.onClose(() -> {
-                if (publisher == connection) {
-                    publisher = null;
-                    event(EndpointEvent.Kind.DISCONNECTED, "publisher " + who + " went away (cause unknown)");
-                    state(EndpointState.WAITING);
-                }
-            });
-            state(EndpointState.ACTIVE);
-        });
-        event(EndpointEvent.Kind.STARTED, "listening on " + address());
+        shared = context.sharedSrtPort(endpoint.port());
+        if (shared != null) {
+            route = new SharedSrtPort.Route(endpoint.streamId(), this::admit, this::accepted,
+                    reason -> event(EndpointEvent.Kind.REJECTED, reason));
+            shared.register(route);
+        } else {
+            // On the brew loop, so the publisher's data arrives where the brew runs.
+            listener = SrtListener.bind(new InetSocketAddress(endpoint.port()),
+                    SrtConfig.defaults().withLatency(endpoint.latency()), context.srtTransport(context.brewLoop()));
+            listener.setAcceptHandler(this::admit);
+            listener.onConnection(this::accepted);
+        }
+        event(EndpointEvent.Kind.STARTED, "listening on " + address()
+                + (shared != null ? " (shared, stream ID '" + endpoint.streamId() + "')" : ""));
         state(EndpointState.WAITING);
+    }
+
+    private AcceptDecision admit(ConnectionRequest request) {
+        AcceptDecision decision = publisher != null
+                ? AcceptDecision.reject(RejectionReason.CONFLICT)
+                : SrtSupport.admit(request, endpoint.streamId(), endpoint.security());
+        if (decision instanceof AcceptDecision.Reject rejected) {
+            event(EndpointEvent.Kind.REJECTED, Reasons.refused(rejected.reason(),
+                    SrtSupport.hostPort(request.peerAddress()), request.streamId()));
+        }
+        return decision;
+    }
+
+    /** On the brew loop, before the caller's first packet. */
+    private void accepted(SrtConnection connection) {
+        publisherSince = System.currentTimeMillis();
+        publisher = connection;
+        String who = SrtSupport.describe(connection);
+        event(EndpointEvent.Kind.CONNECTED, "publisher " + who);
+        connection.onData(this::receive);
+        connection.onClose(() -> {
+            if (publisher == connection) {
+                publisher = null;
+                event(EndpointEvent.Kind.DISCONNECTED, "publisher " + who + " went away (cause unknown)");
+                state(EndpointState.WAITING);
+            }
+        });
+        state(EndpointState.ACTIVE);
     }
 
     @Override
@@ -100,7 +116,13 @@ final class SrtListenerSource extends SourceLeg {
     @Override
     void close() {
         try {
-            if (listener != null) {
+            if (shared != null) {
+                SrtConnection current = publisher;
+                if (current != null) {
+                    current.close();
+                }
+                shared.unregister(route);
+            } else if (listener != null) {
                 listener.close();
             }
         } catch (InterruptedException e) {

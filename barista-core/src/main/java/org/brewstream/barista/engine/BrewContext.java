@@ -44,6 +44,13 @@ interface BrewContext {
     /** Roast on one event loop. */
     SrtTransport srtTransport(EventLoop loop);
 
+    /**
+     * The shared listener for {@code port} when more than one of the brew's SRT
+     * listener endpoints names it, binding it on first use; {@code null} when the
+     * port is the endpoint's alone. Called on the management thread.
+     */
+    SharedSrtPort sharedSrtPort(int port) throws InterruptedException;
+
     /** Press on one event loop. */
     PressTransport pressTransport(EventLoop loop);
 
