@@ -34,7 +34,13 @@ public interface BrewListener {
     default void onEndpointStateChanged(BrewId brew, String endpointId, EndpointState from, EndpointState to) {
     }
 
-    default void onSourceActivated(BrewId brew, SourceId source) {
+    /**
+     * A different source now feeds the outputs.
+     *
+     * @param reason in plain words: "by operator", or why the brew switched by itself, e.g.
+     *               "failover from main: no data for 2000 ms"
+     */
+    default void onSourceActivated(BrewId brew, SourceId source, String reason) {
     }
 
     /**

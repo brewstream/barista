@@ -24,8 +24,8 @@ public enum BrewState {
     RUNNING,
     /**
      * The active source has delivered nothing for the source-loss timeout.
-     * Outputs stay up and send nothing until it returns; a backup source may be
-     * healthy, and switching to it is {@link Barista#activate}.
+     * Outputs stay up and send nothing until it returns or another source takes
+     * over: by {@link Barista#activate}, or by the brew's failover policy.
      */
     SOURCE_LOST,
     /** Not running; spec and ports kept. */

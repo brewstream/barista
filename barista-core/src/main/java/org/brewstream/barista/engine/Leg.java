@@ -28,6 +28,7 @@ abstract class Leg {
     protected final String kind;
     protected final BrewContext context;
     private volatile EndpointState state = EndpointState.STARTING;
+    private volatile long stateSinceNanos = System.nanoTime();
     protected volatile String error;
     protected final EventHistory history = new EventHistory();
     private final HealthRule health;
@@ -51,6 +52,11 @@ abstract class Leg {
         return state;
     }
 
+    /** When the state last changed ({@link System#nanoTime()}). */
+    final long stateSinceNanos() {
+        return stateSinceNanos;
+    }
+
     /** The health word for the status. Safe from any thread. */
     final EndpointHealth health() {
         return health.classify(state);
@@ -65,6 +71,7 @@ abstract class Leg {
         EndpointState previous = state;
         if (previous != next) {
             state = next;
+            stateSinceNanos = System.nanoTime();
             context.endpointStateChanged(id, previous, next);
         }
     }

@@ -73,7 +73,7 @@ final class RunningBrew implements Brew, BrewContext {
 
         void endpointStateChanged(BrewId brew, String endpointId, EndpointState from, EndpointState to);
 
-        void sourceActivated(BrewId brew, SourceId source);
+        void sourceActivated(BrewId brew, SourceId source, String reason);
 
         void endpointEvent(BrewId brew, String endpointId, EndpointEvent event);
     }
@@ -90,6 +90,8 @@ final class RunningBrew implements Brew, BrewContext {
     private final Map<OutputId, OutputLeg> outputs = new ConcurrentHashMap<>();
 
     private volatile SourceLeg active;
+    private volatile long activatedNanos;
+    private volatile boolean switching;
     private volatile SourceLeg[] sourceSnapshot = new SourceLeg[0];
     private volatile OutputLeg[] outputSnapshot = new OutputLeg[0];
     private volatile ScheduledFuture<?> tick;
@@ -110,6 +112,9 @@ final class RunningBrew implements Brew, BrewContext {
         ByteBufAllocator allocator();
 
         EventLoop nextLoop();
+
+        /** Runs a change on the management thread later, without waiting; dropped once closed. */
+        void manage(Runnable change);
 
         SrtTransport srtTransport(EventLoop loop);
 
@@ -191,6 +196,7 @@ final class RunningBrew implements Brew, BrewContext {
             return;
         }
         active = sources.get(spec.preferredSource().id());
+        activatedNanos = System.nanoTime();
         active.event(EndpointEvent.Kind.ACTIVATED, "preferred source at start");
         publishOutputs();
         startedNanos = System.nanoTime();
@@ -264,9 +270,11 @@ final class RunningBrew implements Brew, BrewContext {
         if (current == null || !sources.containsKey(current.spec.id())
                 || sources.get(current.spec.id()) != current) {
             SourceLeg preferred = sources.get(next.preferredSource().id());
+            String reason = "the previously active source was removed or changed";
             active = preferred;
-            preferred.event(EndpointEvent.Kind.ACTIVATED, "the previously active source was removed or changed");
-            events.sourceActivated(next.id(), preferred.spec.id());
+            activatedNanos = System.nanoTime();
+            preferred.event(EndpointEvent.Kind.ACTIVATED, reason);
+            events.sourceActivated(next.id(), preferred.spec.id(), reason);
         }
         publishOutputs();
     }
@@ -276,15 +284,51 @@ final class RunningBrew implements Brew, BrewContext {
         if (leg == null) {
             throw new IllegalArgumentException("brew " + spec.id() + " has no source " + source);
         }
+        switchTo(leg, "by operator");
+    }
+
+    /** On the management thread: makes {@code leg} the active source, saying why. */
+    private void switchTo(SourceLeg leg, String reason) {
         SourceLeg previous = active;
         if (previous != leg) {
             active = leg;
+            activatedNanos = System.nanoTime();
             if (previous != null) {
-                previous.event(EndpointEvent.Kind.DEACTIVATED, "replaced by " + source + " (operator)");
+                previous.event(EndpointEvent.Kind.DEACTIVATED, "replaced by " + leg.spec.id() + ": " + reason);
             }
-            leg.event(EndpointEvent.Kind.ACTIVATED, "by operator");
-            events.sourceActivated(spec.id(), source);
+            leg.event(EndpointEvent.Kind.ACTIVATED, reason);
+            events.sourceActivated(spec.id(), leg.spec.id(), reason);
         }
+    }
+
+    /** On the brew loop: asks the management thread to switch if the failover policy says so. */
+    private void failover(long now, long lossNanos) {
+        SourceLeg current = active;
+        if (current == null || switching || !spec.failover().enabled()) {
+            return;
+        }
+        SourceLeg[] legs = sourceSnapshot;
+        List<Failover.View> views = new ArrayList<>(legs.length);
+        List<SourceSpec> order = spec.sources();
+        for (SourceLeg leg : legs) {
+            boolean delivering = leg.state() == EndpointState.ACTIVE;
+            views.add(new Failover.View(leg.spec.id(), leg.spec.priority(), order.indexOf(leg.spec), leg.health(),
+                    leg.fresh(now, lossNanos), delivering ? now - leg.stateSinceNanos() : 0, leg.failedDials()));
+        }
+        Failover.decide(spec.failover(), views, current.spec.id(), now - activatedNanos, lossNanos)
+                .ifPresent(decision -> {
+                    switching = true;
+                    engine.manage(() -> {
+                        try {
+                            SourceLeg target = sources.get(decision.target());
+                            if (active == current && target != null && tick != null) {
+                                switchTo(target, decision.reason());
+                            }
+                        } finally {
+                            switching = false;
+                        }
+                    });
+                });
     }
 
     private void closeLegs() {
@@ -394,6 +438,7 @@ final class RunningBrew implements Brew, BrewContext {
             for (SourceLeg source : sourceSnapshot) {
                 source.tick(now, loss);
             }
+            failover(now, loss);
             SourceLeg current = active;
             if (current != null && (state == BrewState.STARTING || state == BrewState.RUNNING
                     || state == BrewState.SOURCE_LOST)) {

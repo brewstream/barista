@@ -50,6 +50,19 @@ class BrewSpecTest {
     }
 
     @Test
+    void failoverIsOffUnlessAskedForAndSurvivesOtherChanges() {
+        BrewSpec spec = BrewSpec.of("one", List.of(SourceSpec.of("a", 0, RtpReceiveEndpoint.unicast())), List.of());
+        assertThat(spec.failover().enabled()).isFalse();
+        assertThat(new BrewSpec(spec.id(), "n", spec.sources(), List.of(), true, null).failover())
+                .isEqualTo(FailoverPolicy.off());
+
+        BrewSpec automatic = spec.withFailover(FailoverPolicy.automatic());
+        assertThat(automatic.failover().failback()).as("failback off by default").isFalse();
+        assertThat(automatic.withEnabled(false).withOutputs(List.of()).withSources(spec.sources()).failover())
+                .isEqualTo(FailoverPolicy.automatic());
+    }
+
+    @Test
     void validatesEndpoints() {
         assertThatThrownBy(() -> new SrtSecurity("short", 16)).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new SrtSecurity("long-enough-secret", 20)).isInstanceOf(IllegalArgumentException.class);

@@ -56,6 +56,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -518,8 +519,8 @@ public final class DefaultBarista implements Barista {
         }
 
         @Override
-        public void sourceActivated(BrewId brew, SourceId source) {
-            notifyListeners(l -> l.onSourceActivated(brew, source));
+        public void sourceActivated(BrewId brew, SourceId source, String reason) {
+            notifyListeners(l -> l.onSourceActivated(brew, source, reason));
         }
 
         @Override
@@ -547,6 +548,24 @@ public final class DefaultBarista implements Barista {
         @Override
         public EventLoop nextLoop() {
             return group.next();
+        }
+
+        @Override
+        public void manage(Runnable change) {
+            if (closed) {
+                return;
+            }
+            try {
+                management.execute(() -> {
+                    try {
+                        change.run();
+                    } catch (RuntimeException e) {
+                        LOG.log(Level.WARNING, "a change Barista made by itself failed", e);
+                    }
+                });
+            } catch (RejectedExecutionException e) {
+                // closing: the change no longer matters
+            }
         }
 
         @Override

@@ -27,17 +27,20 @@ import java.util.Set;
  * its outputs (any number). Immutable; this is what a {@code BrewRepository}
  * stores, and the running brew is rebuilt from it after a restart.
  *
- * @param enabled whether the brew should be running. A stopped brew keeps its spec
- *                and its ports.
+ * @param enabled  whether the brew should be running. A stopped brew keeps its spec
+ *                 and its ports.
+ * @param failover whether and how the brew switches sources by itself; {@code null} means
+ *                 {@link FailoverPolicy#off()}
  */
 public record BrewSpec(BrewId id, String name, List<SourceSpec> sources, List<OutputSpec> outputs,
-        boolean enabled) {
+        boolean enabled, FailoverPolicy failover) {
 
     public BrewSpec {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(name, "name");
         sources = List.copyOf(sources);
         outputs = List.copyOf(outputs);
+        failover = failover != null ? failover : FailoverPolicy.off();
         if (sources.isEmpty()) {
             throw new IllegalArgumentException("a brew needs at least one source");
         }
@@ -54,6 +57,11 @@ public record BrewSpec(BrewId id, String name, List<SourceSpec> sources, List<Ou
         }
     }
 
+    /** A brew that switches sources only when an operator says so. */
+    public BrewSpec(BrewId id, String name, List<SourceSpec> sources, List<OutputSpec> outputs, boolean enabled) {
+        this(id, name, sources, outputs, enabled, FailoverPolicy.off());
+    }
+
     /** A new, enabled brew with a random id. */
     public static BrewSpec of(String name, List<SourceSpec> sources, List<OutputSpec> outputs) {
         return new BrewSpec(BrewId.random(), name, sources, outputs, true);
@@ -65,14 +73,18 @@ public record BrewSpec(BrewId id, String name, List<SourceSpec> sources, List<Ou
     }
 
     public BrewSpec withSources(List<SourceSpec> sources) {
-        return new BrewSpec(id, name, sources, outputs, enabled);
+        return new BrewSpec(id, name, sources, outputs, enabled, failover);
     }
 
     public BrewSpec withOutputs(List<OutputSpec> outputs) {
-        return new BrewSpec(id, name, sources, outputs, enabled);
+        return new BrewSpec(id, name, sources, outputs, enabled, failover);
     }
 
     public BrewSpec withEnabled(boolean enabled) {
-        return new BrewSpec(id, name, sources, outputs, enabled);
+        return new BrewSpec(id, name, sources, outputs, enabled, failover);
+    }
+
+    public BrewSpec withFailover(FailoverPolicy failover) {
+        return new BrewSpec(id, name, sources, outputs, enabled, failover);
     }
 }

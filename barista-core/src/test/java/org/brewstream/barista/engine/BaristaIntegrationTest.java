@@ -39,6 +39,7 @@ import org.brewstream.barista.EndpointStatus;
 import org.brewstream.barista.TsFixtures;
 import org.brewstream.barista.spec.BrewId;
 import org.brewstream.barista.spec.BrewSpec;
+import org.brewstream.barista.spec.FailoverPolicy;
 import org.brewstream.barista.spec.OutputSpec;
 import org.brewstream.barista.spec.RtpReceiveEndpoint;
 import org.brewstream.barista.spec.RtpSendEndpoint;
@@ -229,7 +230,7 @@ class BaristaIntegrationTest {
         List<SourceId> activations = new CopyOnWriteArrayList<>();
         barista.addListener(new BrewListener() {
             @Override
-            public void onSourceActivated(BrewId brew, SourceId source) {
+            public void onSourceActivated(BrewId brew, SourceId source, String reason) {
                 activations.add(source);
             }
         });
@@ -518,8 +519,172 @@ class BaristaIntegrationTest {
         List<EndpointEvent> mainHistory = brew.status().sources().get(0).history();
         assertThat(reason(mainHistory, EndpointEvent.Kind.CONNECTED)).startsWith("sender " + HOST + ":").endsWith("heard");
         assertThat(reason(mainHistory, EndpointEvent.Kind.IDLE)).isEqualTo("no data for 400 ms");
-        assertThat(reason(mainHistory, EndpointEvent.Kind.DEACTIVATED)).isEqualTo("replaced by backup (operator)");
+        assertThat(reason(mainHistory, EndpointEvent.Kind.DEACTIVATED)).isEqualTo("replaced by backup: by operator");
         assertThat(reason(brew.status().sources().get(1).history(), EndpointEvent.Kind.ACTIVATED)).isEqualTo("by operator");
+    }
+
+    /**
+     * Losing the active source switches to the next healthy one by priority, not merely
+     * "the other" one, and says why. It does not switch back on its own. (#7)
+     */
+    @Test
+    void failsOverToTheNextHealthySourceByPriority() throws Exception {
+        barista.close();
+        barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
+        List<String> activations = new CopyOnWriteArrayList<>();
+        barista.addListener(new BrewListener() {
+            @Override
+            public void onSourceActivated(BrewId brew, SourceId source, String reason) {
+                activations.add(source.value() + " " + reason);
+            }
+        });
+        Brew brew = barista.create(BrewSpec.of("trio",
+                List.of(SourceSpec.of("spare", 2, RtpReceiveEndpoint.unicast()),
+                        SourceSpec.of("main", 0, RtpReceiveEndpoint.unicast()),
+                        SourceSpec.of("backup", 1, RtpReceiveEndpoint.unicast())), List.of())
+                .withFailover(FailoverPolicy.automatic().withMinDwell(Duration.ofMillis(300))));
+        Pump spare = pump(brew, 0);
+        Pump main = pump(brew, 1);
+        Pump backup = pump(brew, 2);
+        await(() -> brew.status().sources().stream().allMatch(s -> s.health() == EndpointHealth.GOOD),
+                "all three delivering");
+        assertThat(brew.activeSource()).isEqualTo(new SourceId("main"));
+
+        main.close();
+
+        await(() -> brew.activeSource().equals(new SourceId("backup")), "failed over to backup");
+        String why = "failover from main: no data for 400 ms";
+        assertThat(activations).containsExactly("backup " + why);
+        assertThat(reason(brew.status().sources().get(1).history(), EndpointEvent.Kind.DEACTIVATED))
+                .isEqualTo("replaced by backup: " + why);
+        assertThat(reason(brew.status().sources().get(2).history(), EndpointEvent.Kind.ACTIVATED)).isEqualTo(why);
+
+        Pump again = pump(brew, 1);
+        await(() -> brew.status().sources().get(1).health() == EndpointHealth.GOOD, "main back");
+        Thread.sleep(1000);
+        assertThat(brew.activeSource()).as("no failback unless configured").isEqualTo(new SourceId("backup"));
+        assertThat(spare.sent() + backup.sent() + again.sent()).isPositive();
+    }
+
+    /** With failback on, the preferred source takes over again once it has delivered for the dwell. (#7) */
+    @Test
+    void failsBackWhenConfigured() throws Exception {
+        barista.close();
+        barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
+                Duration.ofMillis(400), Duration.ofMillis(200), Duration.ofSeconds(1), Duration.ofSeconds(5), 1.0));
+        Brew brew = barista.create(BrewSpec.of("pair",
+                List.of(SourceSpec.of("main", 0, RtpReceiveEndpoint.unicast()),
+                        SourceSpec.of("backup", 1, RtpReceiveEndpoint.unicast())), List.of())
+                .withFailover(FailoverPolicy.automatic().withMinDwell(Duration.ofMillis(300)).withFailback(true)));
+        Pump main = pump(brew, 0);
+        pump(brew, 1);
+        await(() -> brew.status().sources().stream().allMatch(s -> s.health() == EndpointHealth.GOOD), "both");
+
+        main.close();
+        await(() -> brew.activeSource().equals(new SourceId("backup")), "failed over");
+        pump(brew, 0);
+
+        await(() -> brew.activeSource().equals(new SourceId("main")), "failed back");
+        assertThat(reason(brew.status().sources().get(0).history(), EndpointEvent.Kind.ACTIVATED))
+                .startsWith("failback from backup: main delivering for ");
+    }
+
+    /**
+     * An SRT caller source that cannot dial counts as lost after the configured failed dials,
+     * long before its 60 s loss timeout. (#7)
+     */
+    @Test
+    void failsOverFromACallerThatCannotDial() throws Exception {
+        barista.close();
+        barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
+                Duration.ofSeconds(60), Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofSeconds(5), 1.0));
+        int nobody = freeRun(1);
+        Brew brew = barista.create(BrewSpec.of("dialler",
+                List.of(SourceSpec.of("main", 0, SrtCallerEndpoint.to(HOST, nobody)),
+                        SourceSpec.of("backup", 1, RtpReceiveEndpoint.unicast())), List.of())
+                .withFailover(FailoverPolicy.automatic().withMinDwell(Duration.ZERO).withMaxFailedDials(1)));
+        pump(brew, 1);
+
+        await(() -> brew.activeSource().equals(new SourceId("backup")), "failed over after a failed dial (5 s connect timeout)");
+        assertThat(reason(brew.status().sources().get(1).history(), EndpointEvent.Kind.ACTIVATED))
+                .isEqualTo("failover from main: a dial failed");
+    }
+
+    /**
+     * A caller that failed and then connected starts counting failed dials afresh: with
+     * failback on, it takes over again and stays, rather than being judged lost by its old
+     * failures. (#7)
+     */
+    @Test
+    void aCallerThatReconnectsForgetsItsFailedDials() throws Exception {
+        barista.close();
+        barista = engine(new BaristaSettings(Duration.ofSeconds(2), 256 * 1024, 16 * 1024 * 1024,
+                Duration.ofSeconds(60), Duration.ofMillis(100), Duration.ofMillis(200), Duration.ofSeconds(5), 1.0));
+        int later = freeRun(1);
+        List<String> activations = new CopyOnWriteArrayList<>();
+        barista.addListener(new BrewListener() {
+            @Override
+            public void onSourceActivated(BrewId brew, SourceId source, String reason) {
+                activations.add(source.value());
+            }
+        });
+        Brew brew = barista.create(BrewSpec.of("dialler",
+                List.of(SourceSpec.of("main", 0, SrtCallerEndpoint.to(HOST, later)),
+                        SourceSpec.of("backup", 1, RtpReceiveEndpoint.unicast())), List.of())
+                .withFailover(FailoverPolicy.automatic().withMinDwell(Duration.ZERO).withMaxFailedDials(1)
+                        .withFailback(true)));
+        pump(brew, 1);
+        await(() -> brew.activeSource().equals(new SourceId("backup")), "failed over after a failed dial");
+
+        Brew upstream = barista.create(BrewSpec.of("upstream",
+                List.of(SourceSpec.of("in", 0, RtpReceiveEndpoint.unicast())),
+                List.of(OutputSpec.of("out", SrtListenerEndpoint.any().withPort(later)))));
+        pump(upstream, 0);
+
+        await(() -> brew.activeSource().equals(new SourceId("main")), "failed back once main delivers");
+        Thread.sleep(1000);
+        assertThat(brew.activeSource()).as("main stays").isEqualTo(new SourceId("main"));
+        assertThat(activations).containsExactly("backup", "main");
+    }
+
+    /** Keeps an RTP source fed, in order, until closed. */
+    private final class Pump implements AutoCloseable {
+
+        private final RtpSender sender;
+        private final Thread thread;
+        private volatile boolean running = true;
+        private volatile int packet;
+
+        Pump(InetSocketAddress target) throws Exception {
+            sender = RtpSender.connect(RtpSenderConfig.to(target));
+            thread = Thread.ofPlatform().daemon().start(() -> {
+                while (running) {
+                    sender.write(Unpooled.wrappedBuffer(TsFixtures.packets(packet, 7)));
+                    packet += 7;
+                    try {
+                        Thread.sleep(20);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+            });
+        }
+
+        int sent() {
+            return packet;
+        }
+
+        @Override
+        public void close() throws Exception {
+            running = false;
+            thread.join();
+            sender.close();
+        }
+    }
+
+    private Pump pump(Brew brew, int source) throws Exception {
+        return track(new Pump(rtpAddress(brew, source)));
     }
 
     private static List<EndpointEvent.Kind> kinds(Brew brew) {
