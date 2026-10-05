@@ -178,6 +178,23 @@ class PortOwnershipTest {
         assertThat(barista.brew(new BrewId("conflict")).orElseThrow().state()).isNotEqualTo(BrewState.FAILED);
     }
 
+    /**
+     * Two brews naming the same port outside the configured range: the second is
+     * refused when created, not accepted and left to fail at bind time. (#3)
+     */
+    @Test
+    void refusesASecondBrewOnTheSameOutOfRangePort() throws IOException {
+        int outside = freeRun(1);
+        assertThat(outside < first || outside > first + 2).as("outside the SRT range").isTrue();
+        Brew owner = barista.create(brew("owner", outside, false));
+
+        assertThatThrownBy(() -> barista.create(brew("second", outside, false)))
+                .isInstanceOf(IllegalArgumentException.class);
+
+        barista.delete(owner.id());
+        assertThat(port(barista.create(brew("second", outside, false)))).isEqualTo(outside);
+    }
+
     /** The stored spec says what runs: enabling through update starts, disabling stops. */
     @Test
     void updateHonoursEnabled() {

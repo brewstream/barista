@@ -68,10 +68,36 @@ class RangePortAllocatorTest {
         assertThatThrownBy(() -> ports.reserve(PortKind.RTP_BLOCK, 5004)).isInstanceOf(IllegalStateException.class);
     }
 
+    /** A fixed port outside the ranges is still taken: naming it twice is refused, not left to fail at bind. */
     @Test
-    void portsOutsideTheRangesAreNotTracked() {
+    void tracksFixedPortsOutsideTheRanges() {
         ports.reserve(PortKind.SRT, 7000);
+
+        assertThatThrownBy(() -> ports.reserve(PortKind.SRT, 7000)).isInstanceOf(IllegalStateException.class);
+        ports.release(PortKind.SRT, 7000);
         ports.reserve(PortKind.SRT, 7000);
+    }
+
+    /** SRT and RTP share one UDP port space: a block outside the ranges cannot cover a fixed SRT port. */
+    @Test
+    void refusesAnRtpBlockOverAFixedSrtPort() {
+        ports.reserve(PortKind.SRT, 7002);
+
+        assertThatThrownBy(() -> ports.reserve(PortKind.RTP_BLOCK, 7000)).isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("7000-7004");
+        ports.reserve(PortKind.RTP_BLOCK, 7003);
+        assertThatThrownBy(() -> ports.reserve(PortKind.SRT, 7005)).as("7005 is inside 7003-7007")
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    /** A fixed block reaching into the SRT range takes those ports from allocation too. */
+    @Test
+    void allocationSkipsPortsAFixedBlockReachesInto() {
+        RangePortAllocator allocator = new RangePortAllocator(PortRange.valueOf("9000-9004"),
+                PortRange.valueOf("5000-5024"));
+        allocator.reserve(PortKind.RTP_BLOCK, 8998); // 8998-9002
+
+        assertThat(allocator.allocate(PortKind.SRT)).isEqualTo(9003);
     }
 
     @Test
