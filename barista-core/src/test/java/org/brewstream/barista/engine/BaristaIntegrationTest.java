@@ -649,6 +649,33 @@ class BaristaIntegrationTest {
         assertThat(activations).containsExactly("backup", "main");
     }
 
+    /** SCTE-35 cues arriving on a source show on its status, and pass through untouched. (#8) */
+    @Test
+    void showsSpliceMarkersOnTheSource() throws Exception {
+        Sink out = rtpSink();
+        Brew brew = barista.create(BrewSpec.of("cues",
+                List.of(SourceSpec.of("encoder", 0, SrtListenerEndpoint.any())),
+                List.of(OutputSpec.of("out", RtpSendEndpoint.to(HOST, out.port)))));
+        byte[] ts;
+        try (java.io.InputStream in = BaristaIntegrationTest.class.getResourceAsStream("/splice.ts")) {
+            ts = in.readAllBytes();
+        }
+        SrtConnection publisher = srtPublish(srtPort(brew));
+
+        send(publisher, ts);
+
+        out.await(ts.length);
+        assertThat(out.bytes()).as("cues pass through unchanged").isEqualTo(ts);
+        await(() -> brew.status().sources().getFirst().spliceMarkers().size() == 5, "five markers");
+        EndpointStatus source = brew.status().sources().getFirst();
+        assertThat(source.carriesScte35()).isTrue();
+        assertThat(source.spliceMarkers()).allSatisfy(marker -> assertThat(marker.count()).isEqualTo(2));
+        assertThat(source.spliceMarkers().getFirst().description()).isEqualTo("event 1001 out for 2.0s");
+        EndpointStatus output = brew.status().outputs().getFirst();
+        assertThat(output.carriesScte35()).isFalse();
+        assertThat(output.spliceMarkers()).isEmpty();
+    }
+
     /** Keeps an RTP source fed, in order, until closed. */
     private final class Pump implements AutoCloseable {
 
