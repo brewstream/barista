@@ -24,6 +24,7 @@ import org.brewstream.barista.spec.OutputSpec;
 import org.brewstream.barista.spec.SlowSubscriberPolicy;
 import org.brewstream.barista.spec.SrtListenerEndpoint;
 import org.brewstream.roast.socket.AcceptDecision;
+import org.brewstream.roast.socket.ConnectionRequest;
 import org.brewstream.roast.socket.SrtConfig;
 import org.brewstream.roast.socket.SrtConnection;
 import org.brewstream.roast.socket.SrtListener;
@@ -49,6 +50,8 @@ final class SrtListenerOutput extends OutputLeg {
     private final AtomicLong droppedByDeparted = new AtomicLong();
     private volatile long capacity;
     private SrtListener listener;
+    private SharedSrtPort shared;
+    private SharedSrtPort.Route route;
 
     SrtListenerOutput(OutputSpec spec, SrtListenerEndpoint endpoint, BrewContext context) {
         super(spec, "srt-listener", context);
@@ -58,51 +61,64 @@ final class SrtListenerOutput extends OutputLeg {
 
     @Override
     void open() throws InterruptedException {
-        listener = SrtListener.bind(new InetSocketAddress(endpoint.port()),
-                SrtConfig.defaults().withLatency(endpoint.latency()), context.srtTransport(loop));
-        listener.setAcceptHandler(request -> {
-            AcceptDecision decision = SrtSupport.admit(request, endpoint.streamId(), endpoint.security());
-            if (decision instanceof AcceptDecision.Reject rejected) {
-                event(EndpointEvent.Kind.REJECTED, Reasons.refused(rejected.reason(),
-                        SrtSupport.hostPort(request.peerAddress()), request.streamId()));
-            }
-            return decision;
-        });
-        listener.onConnection(connection -> {
-            Lane lane = new Lane(loop, new OutputQueue(capacity), null, new Lane.Writer() {
-                @Override
-                public boolean writable() {
-                    return connection.channel().isWritable();
-                }
-
-                @Override
-                public void write(ByteBuf chunk) {
-                    SrtSupport.write(connection, chunk);
-                }
-            });
-            connection.pipeline().addLast(SrtSupport.writability(lane));
-            Subscriber subscriber = new Subscriber(connection, lane, System.currentTimeMillis(), new AtomicBoolean());
-            String who = SrtSupport.describe(connection);
-            lane.queue().onDrop(() -> {
-                event(EndpointEvent.Kind.DROPPING, "subscriber " + who + " is slower than the stream: dropping oldest");
-                disconnectIfTooFarBehind(subscriber, who);
-            });
-            subscribers.add(subscriber);
-            event(EndpointEvent.Kind.CONNECTED, "subscriber " + who);
-            connection.onClose(() -> {
-                if (subscribers.remove(subscriber)) {
-                    if (!subscriber.disconnected().get()) {
-                        event(EndpointEvent.Kind.DISCONNECTED, "subscriber " + who + " went away (cause unknown)");
-                    }
-                    droppedByDeparted.addAndGet(lane.queue().dropped());
-                    lane.queue().clear();
-                }
-                state(subscribers.isEmpty() ? EndpointState.WAITING : EndpointState.ACTIVE);
-            });
-            state(EndpointState.ACTIVE);
-        });
-        event(EndpointEvent.Kind.STARTED, "listening on " + context.publishedHost() + ":" + endpoint.port());
+        shared = context.sharedSrtPort(endpoint.port());
+        if (shared != null) {
+            // The shared listener runs on the brew loop; each subscriber's lane still drains on this output's.
+            route = new SharedSrtPort.Route(endpoint.streamId(), this::admit, this::accepted,
+                    reason -> event(EndpointEvent.Kind.REJECTED, reason));
+            shared.register(route);
+        } else {
+            listener = SrtListener.bind(new InetSocketAddress(endpoint.port()),
+                    SrtConfig.defaults().withLatency(endpoint.latency()), context.srtTransport(loop));
+            listener.setAcceptHandler(this::admit);
+            listener.onConnection(this::accepted);
+        }
+        event(EndpointEvent.Kind.STARTED, "listening on " + context.publishedHost() + ":" + endpoint.port()
+                + (shared != null ? " (shared, stream ID '" + endpoint.streamId() + "')" : ""));
         state(EndpointState.WAITING);
+    }
+
+    private AcceptDecision admit(ConnectionRequest request) {
+        AcceptDecision decision = SrtSupport.admit(request, endpoint.streamId(), endpoint.security());
+        if (decision instanceof AcceptDecision.Reject rejected) {
+            event(EndpointEvent.Kind.REJECTED, Reasons.refused(rejected.reason(),
+                    SrtSupport.hostPort(request.peerAddress()), request.streamId()));
+        }
+        return decision;
+    }
+
+    private void accepted(SrtConnection connection) {
+        Lane lane = new Lane(loop, new OutputQueue(capacity), null, new Lane.Writer() {
+            @Override
+            public boolean writable() {
+                return connection.channel().isWritable();
+            }
+
+            @Override
+            public void write(ByteBuf chunk) {
+                SrtSupport.write(connection, chunk);
+            }
+        });
+        connection.pipeline().addLast(SrtSupport.writability(lane));
+        Subscriber subscriber = new Subscriber(connection, lane, System.currentTimeMillis(), new AtomicBoolean());
+        String who = SrtSupport.describe(connection);
+        lane.queue().onDrop(() -> {
+            event(EndpointEvent.Kind.DROPPING, "subscriber " + who + " is slower than the stream: dropping oldest");
+            disconnectIfTooFarBehind(subscriber, who);
+        });
+        subscribers.add(subscriber);
+        event(EndpointEvent.Kind.CONNECTED, "subscriber " + who);
+        connection.onClose(() -> {
+            if (subscribers.remove(subscriber)) {
+                if (!subscriber.disconnected().get()) {
+                    event(EndpointEvent.Kind.DISCONNECTED, "subscriber " + who + " went away (cause unknown)");
+                }
+                droppedByDeparted.addAndGet(lane.queue().dropped());
+                lane.queue().clear();
+            }
+            state(subscribers.isEmpty() ? EndpointState.WAITING : EndpointState.ACTIVE);
+        });
+        state(EndpointState.ACTIVE);
     }
 
     /** On the brew loop, after a drop: applies the slow-subscriber policy. */
@@ -156,7 +172,10 @@ final class SrtListenerOutput extends OutputLeg {
     @Override
     void close() {
         try {
-            if (listener != null) {
+            if (shared != null) {
+                subscribers.forEach(subscriber -> subscriber.connection().close());
+                shared.unregister(route);
+            } else if (listener != null) {
                 listener.close();
             }
         } catch (InterruptedException e) {

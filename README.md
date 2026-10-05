@@ -57,6 +57,19 @@ On an SRT listener output, `withSlowSubscribers(SlowSubscriberPolicy.disconnect(
 disconnects one that stays behind instead (three queues dropped, or 10 s behind,
 by default), so it can rejoin at the live edge; the reason is in the history.
 
+SRT listener endpoints of one brew can share a port: give them the same fixed
+port and each its own stream ID, and one listener routes every connection to the
+endpoint whose stream ID it asks for (an exact match, no naming scheme). Each
+endpoint keeps its own passphrase. A shared port is the brew's alone; every stream
+on it goes through one socket, and a bind failure fails every endpoint on it.
+
+```java
+BrewSpec.of("studio",
+        List.of(SourceSpec.of("in", 0, SrtListenerEndpoint.any().withPort(9000).withStreamId("in"))),
+        List.of(OutputSpec.of("partners", SrtListenerEndpoint.any().withPort(9000).withStreamId("partners")),
+                OutputSpec.of("monitor", SrtListenerEndpoint.any().withPort(9000).withStreamId("monitor"))));
+```
+
 Ports left at 0 are allocated when the brew is created and stored with it, so a
 restart brings it back on the same ports. Every output has its own queue, so a
 slow or dead output never holds up the source or the others.

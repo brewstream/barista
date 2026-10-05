@@ -48,6 +48,7 @@ import org.brewstream.barista.spec.SourceId;
 import org.brewstream.barista.spec.SourceSpec;
 import org.brewstream.barista.spec.SrtCallerEndpoint;
 import org.brewstream.barista.spec.SrtListenerEndpoint;
+import org.brewstream.barista.spec.SrtSecurity;
 import org.brewstream.barista.support.InMemoryBrewRepository;
 import org.brewstream.barista.support.PortRange;
 import org.brewstream.barista.support.RangePortAllocator;
@@ -79,6 +80,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Brews over real sockets on loopback, with Roast and Press as the peers on both
@@ -785,6 +787,149 @@ class BaristaIntegrationTest {
                 Thread.currentThread().interrupt();
             }
         });
+    }
+
+    /**
+     * One SRT port shared by a source and two outputs, each reached by its own stream ID;
+     * an unknown stream ID is refused and every endpoint on the port records it. (#12)
+     */
+    @Test
+    void routesConnectionsOnASharedPortByStreamId() throws Exception {
+        int port = freeRun(1);
+        Brew brew = barista.create(sharedPortBrew(port, null));
+        Sink a = srtSubscriber(port, "out-a");
+        Sink b = srtSubscriber(port, "out-b");
+        await(() -> brew.status().outputs().stream().allMatch(o -> o.connections().size() == 1), "both subscribed");
+        byte[] ts = TsFixtures.packets(0, 7 * 60);
+
+        send(srtPublish(port, "in"), ts);
+
+        a.await(ts.length);
+        b.await(ts.length);
+        assertThat(a.bytes()).isEqualTo(ts);
+        assertThat(b.bytes()).isEqualTo(ts);
+        assertThat(SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), "nope").handle((c, f) -> f)
+                .get(10, TimeUnit.SECONDS)).as("unknown stream ID refused").isNotNull();
+        await(() -> brew.status().outputs().get(1).history().stream()
+                .anyMatch(e -> e.kind() == EndpointEvent.Kind.REJECTED), "refusal recorded");
+        assertThat(reason(brew.status().sources().getFirst().history(), EndpointEvent.Kind.REJECTED))
+                .startsWith("refused ").endsWith(": unknown stream ID 'nope'");
+    }
+
+    /** Each endpoint on a shared port keeps its own passphrase. (#12) */
+    @Test
+    void keepsEachEndpointsPassphraseOnASharedPort() throws Exception {
+        int port = freeRun(1);
+        barista.create(sharedPortBrew(port, new SrtSecurity("out-b-secret-phrase", 16)));
+
+        assertThat(SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), "out-b").handle((c, f) -> f)
+                .get(10, TimeUnit.SECONDS)).as("out-b without its passphrase").isNotNull();
+        SrtConnection keyed = SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), "out-b",
+                "out-b-secret-phrase".toCharArray(), 16).get(10, TimeUnit.SECONDS);
+        resources.add(keyed::close);
+        SrtConnection open = SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), "out-a")
+                .get(10, TimeUnit.SECONDS);
+        resources.add(open::close);
+    }
+
+    /** Removing one endpoint leaves the others on the port connected and fed. (#12) */
+    @Test
+    void removingAnEndpointLeavesTheOthersOnTheSharedPort() throws Exception {
+        int port = freeRun(1);
+        Brew brew = barista.create(sharedPortBrew(port, null));
+        Sink b = srtSubscriber(port, "out-b");
+        SrtConnection leaving = SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), "out-a")
+                .get(5, TimeUnit.SECONDS);
+        resources.add(leaving::close);
+        java.util.concurrent.CountDownLatch closed = new java.util.concurrent.CountDownLatch(1);
+        leaving.onClose(closed::countDown);
+        SrtConnection publisher = srtPublish(port, "in");
+        await(() -> brew.status().outputs().stream().allMatch(o -> o.connections().size() == 1), "both subscribed");
+
+        barista.update(brew.spec().withOutputs(List.of(brew.spec().outputs().get(1))));
+        byte[] ts = TsFixtures.packets(0, 7 * 60);
+        send(publisher, ts);
+
+        b.await(ts.length);
+        assertThat(b.bytes()).as("out-b still fed after out-a left").isEqualTo(ts);
+        assertThat(closed.await(10, TimeUnit.SECONDS)).as("out-a's own subscriber disconnected").isTrue();
+        assertThat(brew.status().sources().getFirst().state()).isEqualTo(EndpointState.ACTIVE);
+    }
+
+    /** A port that becomes shared on update moves its first endpoint onto the shared listener. (#12) */
+    @Test
+    void anExclusivePortBecomesSharedOnUpdate() throws Exception {
+        int port = freeRun(1);
+        Brew brew = barista.create(BrewSpec.of("grows",
+                List.of(SourceSpec.of("in", 0, new SrtListenerEndpoint(port, "in", null, Duration.ofMillis(120)))),
+                List.of()));
+
+        barista.update(brew.spec().withOutputs(List.of(
+                OutputSpec.of("out", new SrtListenerEndpoint(port, "out", null, Duration.ofMillis(120))))));
+        Sink out = srtSubscriber(port, "out");
+        await(() -> brew.status().outputs().getFirst().connections().size() == 1, "subscribed");
+        byte[] ts = TsFixtures.packets(0, 7 * 60);
+        send(srtPublish(port, "in"), ts);
+
+        out.await(ts.length);
+        assertThat(out.bytes()).isEqualTo(ts);
+    }
+
+    /** Sharing stays within a brew: another brew cannot take the port. (#12) */
+    @Test
+    void anotherBrewCannotJoinASharedPort() throws Exception {
+        int port = freeRun(1);
+        barista.create(sharedPortBrew(port, null));
+
+        BrewSpec intruder = BrewSpec.of("intruder",
+                List.of(SourceSpec.of("in", 0, new SrtListenerEndpoint(port, "other", null, Duration.ofMillis(120)))),
+                List.of());
+        assertThatThrownBy(() -> barista.create(intruder)).isInstanceOf(IllegalArgumentException.class);
+
+        barista.delete(barista.brews().iterator().next().id());
+        assertThat(barista.create(intruder).status().sources().getFirst().state())
+                .as("the port is free once its last endpoint has gone").isNotEqualTo(EndpointState.FAILED);
+    }
+
+    /** An update that moves a port from an output to a source closes the output before opening the source. */
+    @Test
+    void anUpdateClosesLegsBeforeOpeningOthers() throws Exception {
+        int port = freeRun(1);
+        Brew brew = barista.create(BrewSpec.of("moves",
+                List.of(SourceSpec.of("rtp", 0, RtpReceiveEndpoint.unicast())),
+                List.of(OutputSpec.of("out", new SrtListenerEndpoint(port, null, null, Duration.ofMillis(120))))));
+
+        BrewSpec before = brew.spec();
+        barista.update(new BrewSpec(before.id(), before.name(), List.of(before.sources().getFirst(),
+                SourceSpec.of("srt", 1, new SrtListenerEndpoint(port, null, null, Duration.ofMillis(120)))),
+                List.of(), true));
+
+        assertThat(brew.status().sources().get(1).state()).as("it bound the port the output left")
+                .isEqualTo(EndpointState.WAITING);
+    }
+
+    /** A source "in" and outputs "out-a" and "out-b" (with {@code outB} security) on one port. */
+    private static BrewSpec sharedPortBrew(int port, SrtSecurity outB) {
+        return BrewSpec.of("shared-" + port,
+                List.of(SourceSpec.of("in", 0, new SrtListenerEndpoint(port, "in", null, Duration.ofMillis(120)))),
+                List.of(OutputSpec.of("a", new SrtListenerEndpoint(port, "out-a", null, Duration.ofMillis(120))),
+                        OutputSpec.of("b", new SrtListenerEndpoint(port, "out-b", outB, Duration.ofMillis(120)))));
+    }
+
+    private SrtConnection srtPublish(int port, String streamId) throws Exception {
+        SrtConnection connection = SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), streamId)
+                .get(5, TimeUnit.SECONDS);
+        resources.add(connection::close);
+        return connection;
+    }
+
+    private Sink srtSubscriber(int port, String streamId) throws Exception {
+        Sink sink = new Sink(port);
+        SrtConnection connection = SrtCaller.connect(new InetSocketAddress(LOOPBACK, port), streamId)
+                .get(5, TimeUnit.SECONDS);
+        connection.onData(sink::accept);
+        resources.add(connection::close);
+        return sink;
     }
 
     /** Keeps an RTP source fed, in order, until closed. */

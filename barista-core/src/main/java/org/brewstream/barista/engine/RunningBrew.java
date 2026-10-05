@@ -41,11 +41,14 @@ import org.brewstream.barista.spec.SrtListenerEndpoint;
 import org.brewstream.press.net.PressTransport;
 import org.brewstream.roast.socket.SrtTransport;
 
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -92,6 +95,8 @@ final class RunningBrew implements Brew, BrewContext {
     private final Map<OutputId, OutputLeg> outputs = new ConcurrentHashMap<>();
 
     private volatile SourceLeg active;
+    // Shared SRT listener ports, by port. Touched on the management thread.
+    private final Map<Integer, SharedSrtPort> sharedSrtPorts = new HashMap<>();
     private volatile long activatedNanos;
     private volatile boolean switching;
     private volatile SourceLeg[] sourceSnapshot = new SourceLeg[0];
@@ -238,11 +243,24 @@ final class RunningBrew implements Brew, BrewContext {
             return;
         }
         try {
+            // Every close before any open: a port a closing leg holds may be the one an opening leg needs.
+            Set<Integer> sharedBefore = previous.sharedSrtPorts();
+            Set<Integer> sharedAfter = next.sharedSrtPorts();
             for (SourceSpec old : previous.sources()) {
                 SourceSpec now = find(next.sources(), old.id());
-                if (now == null || !now.endpoint().equals(old.endpoint())) {
+                if (now == null || changed(old.endpoint(), now.endpoint(), sharedBefore, sharedAfter)) {
                     SourceLeg leg = sources.remove(old.id());
                     if (leg != null) {
+                        leg.close();
+                    }
+                }
+            }
+            for (OutputSpec old : previous.outputs()) {
+                OutputSpec now = findOutput(next.outputs(), old.id());
+                if (now == null || changed(old.endpoint(), now.endpoint(), sharedBefore, sharedAfter)) {
+                    OutputLeg leg = outputs.remove(old.id());
+                    if (leg != null) {
+                        removeFromSnapshot(leg);
                         leg.close();
                     }
                 }
@@ -250,16 +268,6 @@ final class RunningBrew implements Brew, BrewContext {
             for (SourceSpec source : next.sources()) {
                 if (!sources.containsKey(source.id())) {
                     sources.put(source.id(), openSource(source));
-                }
-            }
-            for (OutputSpec old : previous.outputs()) {
-                OutputSpec now = findOutput(next.outputs(), old.id());
-                if (now == null || !now.endpoint().equals(old.endpoint())) {
-                    OutputLeg leg = outputs.remove(old.id());
-                    if (leg != null) {
-                        removeFromSnapshot(leg);
-                        leg.close();
-                    }
                 }
             }
             for (OutputSpec output : next.outputs()) {
@@ -285,6 +293,40 @@ final class RunningBrew implements Brew, BrewContext {
             events.sourceActivated(next.id(), preferred.spec.id(), reason);
         }
         publishOutputs();
+    }
+
+    /**
+     * Whether a leg must be reopened: its endpoint changed, or its SRT port went from
+     * being its own to being shared, or back, which moves it to a different listener.
+     */
+    private static boolean changed(Object old, Object now, Set<Integer> sharedBefore, Set<Integer> sharedAfter) {
+        if (!now.equals(old)) {
+            return true;
+        }
+        return now instanceof SrtListenerEndpoint srt && srt.port() != 0
+                && sharedBefore.contains(srt.port()) != sharedAfter.contains(srt.port());
+    }
+
+    @Override
+    public SharedSrtPort sharedSrtPort(int port) throws InterruptedException {
+        if (!spec.sharedSrtPorts().contains(port)) {
+            return null;
+        }
+        SharedSrtPort existing = sharedSrtPorts.get(port);
+        if (existing != null) {
+            return existing;
+        }
+        Duration latency = java.util.stream.Stream.concat(
+                        spec.sources().stream().map(SourceSpec::endpoint),
+                        spec.outputs().stream().map(OutputSpec::endpoint))
+                .filter(endpoint -> endpoint instanceof SrtListenerEndpoint srt && srt.port() == port)
+                .map(endpoint -> ((SrtListenerEndpoint) endpoint).latency())
+                .findFirst()
+                .orElseThrow();
+        SharedSrtPort bound = SharedSrtPort.bind(port, latency, srtTransport(brewLoop),
+                () -> sharedSrtPorts.remove(port));
+        sharedSrtPorts.put(port, bound);
+        return bound;
     }
 
     void activate(SourceId source) {

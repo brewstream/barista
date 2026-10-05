@@ -55,6 +55,15 @@ public record SrtListenerEndpoint(int port, String streamId, SrtSecurity securit
         return new SrtListenerEndpoint(port, streamId, security, latency, slowSubscribers);
     }
 
+    /** Only callers asking for {@code streamId}; on a shared port, the stream ID that reaches this endpoint. */
+    public SrtListenerEndpoint withStreamId(String streamId) {
+        return new SrtListenerEndpoint(port, streamId, security, latency, slowSubscribers);
+    }
+
+    public SrtListenerEndpoint withSecurity(SrtSecurity security) {
+        return new SrtListenerEndpoint(port, streamId, security, latency, slowSubscribers);
+    }
+
     public SrtListenerEndpoint withSlowSubscribers(SlowSubscriberPolicy slowSubscribers) {
         return new SrtListenerEndpoint(port, streamId, security, latency, slowSubscribers);
     }
