@@ -20,6 +20,8 @@ import org.brewstream.barista.spi.PortAllocator;
 import org.brewstream.barista.spi.PortKind;
 
 import java.util.BitSet;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Allocates from two configured ranges: single ports for SRT, and blocks of five
@@ -36,6 +38,8 @@ public final class RangePortAllocator implements PortAllocator {
     private final PortRange rtp;
     private final BitSet srtUsed = new BitSet();
     private final BitSet rtpUsed = new BitSet();
+    /** Ports held by fixed reservations outside the ranges. */
+    private final Set<Integer> fixed = new HashSet<>();
 
     /**
      * @param srt single ports for SRT listeners
@@ -55,53 +59,91 @@ public final class RangePortAllocator implements PortAllocator {
     @Override
     public synchronized int allocate(PortKind kind) {
         if (kind == PortKind.SRT) {
-            int index = srtUsed.nextClearBit(0);
-            if (srt.first() + index > srt.last()) {
-                throw new IllegalStateException("no free SRT port in " + srt);
+            for (int port = srt.first(); port <= srt.last(); port++) {
+                if (!occupied(port)) {
+                    srtUsed.set(port - srt.first());
+                    return port;
+                }
             }
-            srtUsed.set(index);
-            return srt.first() + index;
+            throw new IllegalStateException("no free SRT port in " + srt);
         }
         for (int index = 0; rtp.first() + index * RTP_BLOCK_STEP + 4 <= rtp.last(); index++) {
-            if (!rtpUsed.get(index)) {
+            int base = rtp.first() + index * RTP_BLOCK_STEP;
+            if (!anyOccupied(base, base + 4)) {
                 rtpUsed.set(index);
-                return rtp.first() + index * RTP_BLOCK_STEP;
+                return base;
             }
         }
         throw new IllegalStateException("no free RTP block in " + rtp);
     }
 
+    /**
+     * Takes a specific port, or for RTP the block P to P+4, wherever it is.
+     * Inside the ranges it is marked like an allocation; outside them it is
+     * remembered all the same, because SRT and RTP share one UDP port space and a
+     * port named twice fails at bind time otherwise. Any overlap with a port
+     * already taken, of either kind, is refused.
+     */
     @Override
     public synchronized void reserve(PortKind kind, int port) {
-        if (kind == PortKind.SRT) {
-            if (srt.contains(port)) {
-                if (srtUsed.get(port - srt.first())) {
-                    throw new IllegalStateException("SRT port " + port + " is already taken");
-                }
-                srtUsed.set(port - srt.first());
-            }
-            return; // outside the range: not ours to track
+        int last = kind == PortKind.SRT ? port : port + 4;
+        if (kind == PortKind.RTP_BLOCK && rtp.contains(port) && (port - rtp.first()) % RTP_BLOCK_STEP != 0) {
+            throw new IllegalStateException("RTP port " + port + " is not a block base in " + rtp);
         }
-        if (rtp.contains(port)) {
-            if ((port - rtp.first()) % RTP_BLOCK_STEP != 0) {
-                throw new IllegalStateException("RTP port " + port + " is not a block base in this range");
+        if (anyOccupied(port, last)) {
+            throw new IllegalStateException(describe(kind, port) + " overlaps a port already taken");
+        }
+        if (kind == PortKind.SRT && srt.contains(port)) {
+            srtUsed.set(port - srt.first());
+        } else if (kind == PortKind.RTP_BLOCK && rtp.contains(port)) {
+            rtpUsed.set((port - rtp.first()) / RTP_BLOCK_STEP);
+        } else {
+            for (int p = port; p <= last; p++) {
+                fixed.add(p);
             }
-            int index = (port - rtp.first()) / RTP_BLOCK_STEP;
-            if (rtpUsed.get(index)) {
-                throw new IllegalStateException("RTP block " + port + " is already taken");
-            }
-            rtpUsed.set(index);
         }
     }
 
     @Override
     public synchronized void release(PortKind kind, int port) {
-        if (kind == PortKind.SRT) {
-            if (srt.contains(port)) {
-                srtUsed.clear(port - srt.first());
-            }
-        } else if (rtp.contains(port) && (port - rtp.first()) % RTP_BLOCK_STEP == 0) {
+        if (kind == PortKind.SRT && srt.contains(port)) {
+            srtUsed.clear(port - srt.first());
+        } else if (kind == PortKind.RTP_BLOCK && rtp.contains(port) && (port - rtp.first()) % RTP_BLOCK_STEP == 0) {
             rtpUsed.clear((port - rtp.first()) / RTP_BLOCK_STEP);
+        } else {
+            int last = kind == PortKind.SRT ? port : port + 4;
+            for (int p = port; p <= last; p++) {
+                fixed.remove(p);
+            }
         }
+    }
+
+    /** Whether a port is taken by anything this allocator knows of, of either kind. */
+    private boolean occupied(int port) {
+        if (fixed.contains(port)) {
+            return true;
+        }
+        if (srt.contains(port) && srtUsed.get(port - srt.first())) {
+            return true;
+        }
+        if (rtp.contains(port)) {
+            int index = (port - rtp.first()) / RTP_BLOCK_STEP;
+            int base = rtp.first() + index * RTP_BLOCK_STEP;
+            return port <= base + 4 && rtpUsed.get(index);
+        }
+        return false;
+    }
+
+    private boolean anyOccupied(int first, int last) {
+        for (int port = first; port <= last; port++) {
+            if (occupied(port)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String describe(PortKind kind, int port) {
+        return kind == PortKind.SRT ? "SRT port " + port : "RTP block " + port + "-" + (port + 4);
     }
 }
