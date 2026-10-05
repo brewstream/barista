@@ -30,13 +30,25 @@ package org.brewstream.barista;
  *                       no clock had been seen yet
  * @param spliceSeconds  stream time at which the splice takes effect, or -1 when the
  *                       section names no time (an immediate splice, a {@code splice_null})
- * @param preRollSeconds warning the first copy gave: splice time minus the program clock (PCR)
- *                       at arrival, or -1 when either is unknown. Negative means it arrived
- *                       after its splice point. Measured against the PCR, this is time until
- *                       the splice is presented; equipment that acts on frames as they arrive
- *                       has less, by the stream's mux delay (video PTS runs ahead of the PCR)
+ * @param preRollSeconds warning the first copy gave: splice time minus the latest video PTS in
+ *                       its program at arrival, the warning equipment acting on frames as they
+ *                       arrive gets (TSDuck's "time to event"). Without video, measured against
+ *                       the program clock instead; see {@code preRollBasis}. -1 when the section
+ *                       names no time or no clock was known. Negative means it arrived after its
+ *                       splice point
+ * @param preRollBasis   which clock {@code preRollSeconds} was measured against
  * @param count          copies received
  */
 public record SpliceMarker(int pid, String command, String description, long firstMillis, long lastMillis,
-        double arrivalSeconds, double spliceSeconds, double preRollSeconds, int count) {
+        double arrivalSeconds, double spliceSeconds, double preRollSeconds, PreRollBasis preRollBasis, int count) {
+
+    /** Which clock a marker's pre-roll was measured against. */
+    public enum PreRollBasis {
+        /** The latest video PTS in the program: what an encoder downstream has to act on. */
+        VIDEO_PTS,
+        /** The program clock, because the program had no video PTS; longer by the mux delay. */
+        PCR,
+        /** No pre-roll: the section names no time, or no clock had been seen. */
+        NONE
+    }
 }
