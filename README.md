@@ -36,9 +36,17 @@ brew.status();                                   // every leg: state, a health w
                                                  // DOWN), traffic, TS health (Grind), and
                                                  // each connection with typed SRT or RTP stats, and
                                                  // what happened and why ("no answer from 10.0.0.9:9000")
-barista.activate(brew.id(), new SourceId("backup"));
+barista.activate(brew.id(), new SourceId("backup"));  // or let the brew switch by itself:
+barista.update(brew.spec().withFailover(FailoverPolicy.automatic()));
 barista.update(brew.spec().withOutputs(...));    // outputs join and leave while it runs
 ```
+
+With a failover policy, a brew switches by itself when the active source is lost
+(no data for the source-loss timeout) or, for an SRT caller, after failed dials
+(3 by default). It picks the healthiest other source by priority, stays at least
+the dwell time (10 s by default) on a source, and says why in the event history and
+`onSourceActivated`. Failback is off by default: a recovered primary takes over again
+only if the policy says so, because switching back on air is a glitch.
 
 Ports left at 0 are allocated when the brew is created and stored with it, so a
 restart brings it back on the same ports. Every output has its own queue, so a

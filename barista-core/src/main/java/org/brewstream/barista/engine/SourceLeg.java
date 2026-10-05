@@ -81,6 +81,11 @@ abstract class SourceLeg extends Leg {
         return last != 0 && nowNanos - last < lossNanos;
     }
 
+    /** Dials in a row that failed, for a source that dials; 0 for any other. */
+    int failedDials() {
+        return 0;
+    }
+
     boolean everDelivered() {
         return lastDataNanos != 0;
     }

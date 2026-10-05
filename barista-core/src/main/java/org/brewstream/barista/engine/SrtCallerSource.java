@@ -34,6 +34,7 @@ final class SrtCallerSource extends SourceLeg {
     private final SrtCallerEndpoint endpoint;
     private Redialer redialer;
     private volatile long connectedSince;
+    private volatile int failedDials;
 
     SrtCallerSource(SourceSpec spec, SrtCallerEndpoint endpoint, BrewContext context) {
         super(spec, "srt-caller", context);
@@ -49,6 +50,7 @@ final class SrtCallerSource extends SourceLeg {
                         context.srtTransport(context.brewLoop())),
                 connection -> {
                     connectedSince = System.currentTimeMillis();
+                    failedDials = 0;
                     connection.onData(this::receive);
                     event(EndpointEvent.Kind.CONNECTED, "connected to " + address());
                     state(EndpointState.ACTIVE);
@@ -57,7 +59,10 @@ final class SrtCallerSource extends SourceLeg {
                     event(EndpointEvent.Kind.DISCONNECTED, "connection to " + address() + " ended (cause unknown)");
                     state(EndpointState.RECONNECTING);
                 },
-                failure -> event(EndpointEvent.Kind.FAILED, Reasons.dialFailed(failure, address())));
+                failure -> {
+                    failedDials = failedDials + 1; // dials are sequential: one writer at a time
+                    event(EndpointEvent.Kind.FAILED, Reasons.dialFailed(failure, address()));
+                });
         event(EndpointEvent.Kind.STARTED, "dialling " + address());
         state(EndpointState.CONNECTING);
         redialer.start();
@@ -66,6 +71,11 @@ final class SrtCallerSource extends SourceLeg {
     @Override
     boolean connected() {
         return redialer != null && redialer.connection() != null;
+    }
+
+    @Override
+    int failedDials() {
+        return failedDials;
     }
 
     @Override
