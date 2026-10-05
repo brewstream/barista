@@ -64,6 +64,7 @@ final class SpliceMarkers {
         final long firstMillis;
         final double arrivalSeconds;
         final double preRollSeconds;
+        final SpliceMarker.PreRollBasis preRollBasis;
         long lastMillis;
         int count = 1;
 
@@ -75,11 +76,12 @@ final class SpliceMarkers {
             this.lastMillis = now;
             this.arrivalSeconds = event.arrivalSeconds();
             this.preRollSeconds = event.preRollSeconds();
+            this.preRollBasis = SpliceMarker.PreRollBasis.valueOf(event.preRollBasis().name());
         }
 
         SpliceMarker marker() {
             return new SpliceMarker(pid, section.commandType().label(), description, firstMillis, lastMillis,
-                    arrivalSeconds, section.spliceTimeSeconds(), preRollSeconds, count);
+                    arrivalSeconds, section.spliceTimeSeconds(), preRollSeconds, preRollBasis, count);
         }
     }
 }

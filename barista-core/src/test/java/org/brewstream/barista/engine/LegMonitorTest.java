@@ -36,11 +36,9 @@ import static org.assertj.core.api.Assertions.within;
  * SCTE-35 on a source. {@code splice.ts} comes from Grind's fixtures (made with TSDuck):
  * five sections on PID 500, each sent twice.
  *
- * <p>Pre-roll is Grind's: splice time minus the program clock (PCR) when the cue arrived,
- * which for the first copy of event 1001 is 403,200 / 90 kHz minus the last PCR before
- * packet 264, 2.456 s, computed from the raw packets outside Grind. TSDuck's
- * {@code splicemonitor} reports 1,714 ms for the same cue because it counts from the
- * latest video PTS instead, which runs ahead of the PCR by the mux delay.
+ * <p>Pre-roll counts from the latest video PTS, as TSDuck's {@code splicemonitor} does: for
+ * the first copy of event 1001, 403,200 / 90 kHz minus the last video PTS before packet 264
+ * is 1.720 s, computed from the raw packets outside Grind; TSDuck reports 1,714 ms.
  */
 class LegMonitorTest {
 
@@ -106,8 +104,10 @@ class LegMonitorTest {
         assertThat(out.command()).isEqualTo("splice_insert");
         assertThat(out.description()).isEqualTo("event 1001 out for 2.0s");
         assertThat(out.spliceSeconds()).isCloseTo(403_200 / 90_000.0, within(0.000_1));
-        assertThat(out.preRollSeconds()).as("against the PCR").isCloseTo(2.456_186, within(0.000_01));
-        assertThat(out.spliceSeconds() - out.arrivalSeconds()).isCloseTo(out.preRollSeconds(), within(0.000_1));
+        assertThat(out.preRollBasis()).isEqualTo(SpliceMarker.PreRollBasis.VIDEO_PTS);
+        assertThat(out.preRollSeconds()).as("against the video PTS").isCloseTo(1.720, within(0.000_01));
+        assertThat(out.spliceSeconds() - out.arrivalSeconds()).as("the PCR view, still derivable")
+                .isCloseTo(2.456_186, within(0.000_01));
         assertThat(markers).extracting(SpliceMarker::command)
                 .containsExactly("splice_insert", "time_signal", "splice_insert", "time_signal", "time_signal");
     }
